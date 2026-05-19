@@ -11,6 +11,7 @@ type TabId = "home" | "diary" | "search" | "calendar" | "assistant" | "insights"
 type MealSlot = "breakfast" | "lunch" | "dinner" | "snack";
 type ServingMode = "grams" | "serving" | "package";
 type ScanMode = "search" | "barcode" | "photo";
+type ToastTone = "success" | "error" | "info";
 type CalendarEventType = "meal" | "training" | "task" | "note";
 type CalendarEventStatus = "planned" | "done" | "skipped";
 type UserRole = "user" | "admin";
@@ -153,7 +154,16 @@ type ProfileFormState = {
   activityLevel: ActivityLevel;
 };
 
-const PRODUCT_PAGE_SIZE = 1000;
+type ToastState = {
+  id: number;
+  tone: ToastTone;
+  message: string;
+  actionLabel?: string;
+  onAction?: () => void;
+};
+
+const PRODUCT_PAGE_SIZE = 50;
+const SESSION_EXPIRED_MESSAGE = "Session expired. Login again to save changes.";
 
 const tabs: { id: TabId; label: string; short: string }[] = [
   { id: "home", label: "Main", short: "Main" },
@@ -318,6 +328,30 @@ function foodTitle(food: FoodItem) {
   return name || food.name;
 }
 
+function foodDedupeKey(food: FoodItem) {
+  return [
+    foodTitle(food).toLowerCase(),
+    (food.store || "").toLowerCase(),
+    (food.brand || "").toLowerCase(),
+    food.calories,
+    food.protein_g,
+    food.carbs_g,
+    food.fat_g,
+  ].join("|");
+}
+
+function dedupeFoods(items: FoodItem[]) {
+  const seen = new Set<string>();
+  return items.filter((food) => {
+    const key = foodDedupeKey(food);
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
 function scaledFood(food: FoodItem, multiplier: number) {
   return {
     calories: Math.round(food.calories * multiplier),
@@ -340,6 +374,20 @@ function fromDateTimeLocal(value: string) {
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Something went wrong.";
+}
+
+class ApiError extends Error {
+  status: number;
+
+  constructor(message: string, statusCode: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = statusCode;
+  }
+}
+
+function getErrorStatus(error: unknown) {
+  return error instanceof ApiError ? error.status : null;
 }
 
 function safeInitials(value: string) {
@@ -416,7 +464,7 @@ async function apiRequest<T>(
     } catch {
       // Keep status message.
     }
-    throw new Error(detail);
+    throw new ApiError(detail, response.status);
   }
 
   if (response.status === 204) {
@@ -491,30 +539,6 @@ function AvatarBubble({
         <span>{safeInitials(profile?.name || "TrackFood") || "TF"}</span>
       )}
     </span>
-  );
-}
-
-function ThemeToggle({
-  theme,
-  onChange,
-}: {
-  theme: Theme;
-  onChange: (theme: Theme) => void;
-}) {
-  return (
-    <div className="theme-toggle" aria-label="Theme">
-      {(["light", "dark"] as Theme[]).map((item) => (
-        <button
-          key={item}
-          type="button"
-          aria-pressed={theme === item}
-          className={theme === item ? "is-active" : ""}
-          onClick={() => onChange(item)}
-        >
-          {item === "light" ? "Light" : "Dark"}
-        </button>
-      ))}
-    </div>
   );
 }
 
@@ -937,7 +961,6 @@ function GuestPreview({
   status,
   authMode,
   authForm,
-  onThemeChange,
   onAuthModeChange,
   onAuthFormChange,
   onSubmit,
@@ -946,7 +969,6 @@ function GuestPreview({
   status: string;
   authMode: AuthMode;
   authForm: AuthFormState;
-  onThemeChange: (theme: Theme) => void;
   onAuthModeChange: (mode: AuthMode) => void;
   onAuthFormChange: (updater: (current: AuthFormState) => AuthFormState) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -964,7 +986,7 @@ function GuestPreview({
             <span>TF</span>
             <strong>TrackFood AI</strong>
           </a>
-          <ThemeToggle theme={theme} onChange={onThemeChange} />
+          <span className="dark-only-pill">Dark beta</span>
         </header>
 
         <div className="guest-grid">
@@ -1046,7 +1068,7 @@ function BottomNav({
 export default function TrackFoodApp() {
   const barcodeVideoRef = useRef<HTMLVideoElement | null>(null);
   const barcodeStreamRef = useRef<MediaStream | null>(null);
-  const [theme, setTheme] = useState<Theme>("light");
+  const [theme, setTheme] = useState<Theme>("dark");
   const [isHydrated, setIsHydrated] = useState(false);
   const [activeTab, setActiveTab] = useState<TabId>("home");
   const [isRailOpen, setIsRailOpen] = useState(true);
@@ -1100,6 +1122,11 @@ export default function TrackFoodApp() {
   const [securitySummary, setSecuritySummary] = useState<SecuritySummary | null>(null);
   const [intruders, setIntruders] = useState<IntruderFlag[]>([]);
   const [scrollDepth, setScrollDepth] = useState(0);
+  const [toast, setToast] = useState<ToastState | null>(null);
+  const [isSavingMeal, setIsSavingMeal] = useState(false);
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [isSavingCalendar, setIsSavingCalendar] = useState(false);
+  const [isSavingContext, setIsSavingContext] = useState(false);
   const [authForm, setAuthForm] = useState({
     name: "",
     email: "",
@@ -1202,13 +1229,12 @@ export default function TrackFoodApp() {
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
-      const savedTheme = window.localStorage.getItem("trackfood-theme") as Theme | null;
       const savedToken = window.localStorage.getItem("trackfood-token");
       const savedProfile = readStoredProfile();
       const savedFoodRaw = window.localStorage.getItem("trackfood-saved-foods");
-      const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
 
-      setTheme(savedTheme ?? (prefersDark ? "dark" : "light"));
+      setTheme("dark");
+      window.localStorage.setItem("trackfood-theme", "dark");
       setToken(savedToken);
       setProfile(savedProfile);
       if (savedFoodRaw) {
@@ -1237,7 +1263,7 @@ export default function TrackFoodApp() {
 
       void apiRequest<FoodItem[]>(`/api/v1/foods?limit=${PRODUCT_PAGE_SIZE}`)
         .then((items) => {
-          setFoods(items.length ? items : fallbackFoods);
+          setFoods(items.length ? dedupeFoods(items) : fallbackFoods);
           setFoodOffset(items.length);
           setCanLoadMoreFoods(items.length === PRODUCT_PAGE_SIZE);
           setStatus(items.length > 10 ? `${items.length} products ready` : "Product database ready");
@@ -1260,7 +1286,13 @@ export default function TrackFoodApp() {
             window.localStorage.setItem("trackfood-profile", JSON.stringify(remoteProfile));
             void refreshSecurity(savedToken, remoteProfile);
           })
-          .catch((error) => setStatus(getErrorMessage(error)));
+          .catch((error) => {
+            if (getErrorStatus(error) === 401) {
+              handleSessionExpired();
+              return;
+            }
+            setStatus(getErrorMessage(error));
+          });
         void apiRequest<MealLog[]>("/api/v1/meals", {}, savedToken)
           .then((remoteMeals) => {
             setMeals(remoteMeals);
@@ -1362,9 +1394,10 @@ export default function TrackFoodApp() {
       setFoodSearchError("");
       setLastFoodQuery(nextQuery.trim());
       const items = await apiRequest<FoodItem[]>(`/api/v1/foods?${params.toString()}`);
+      const nextItems = dedupeFoods(items);
       const shouldUseFallback = !nextOffset && !nextQuery.trim() && !nextStore.trim() && !items.length;
       setFoods((current) =>
-        nextOffset > 0 ? [...current, ...items] : shouldUseFallback ? fallbackFoods : items,
+        nextOffset > 0 ? dedupeFoods([...current, ...nextItems]) : shouldUseFallback ? fallbackFoods : nextItems,
       );
       setFoodOffset(nextOffset + items.length);
       setCanLoadMoreFoods(items.length === PRODUCT_PAGE_SIZE);
@@ -1484,6 +1517,47 @@ export default function TrackFoodApp() {
     }
   }
 
+  function showToast(
+    message: string,
+    tone: ToastTone = "info",
+    action?: { label: string; run: () => void },
+  ) {
+    const id = Date.now();
+    setToast({
+      id,
+      tone,
+      message,
+      actionLabel: action?.label,
+      onAction: action?.run,
+    });
+    window.setTimeout(() => {
+      setToast((current) => (current?.id === id ? null : current));
+    }, 4200);
+  }
+
+  function handleSessionExpired() {
+    setToken(null);
+    setProfile(null);
+    setMeals([]);
+    setCalendarEvents([]);
+    setAssistantContexts([]);
+    setAssistantMessages([]);
+    window.localStorage.removeItem("trackfood-token");
+    window.localStorage.removeItem("trackfood-profile");
+    setStatus(SESSION_EXPIRED_MESSAGE);
+    showToast(SESSION_EXPIRED_MESSAGE, "error");
+  }
+
+  function handleSaveError(error: unknown, fallback = "Save failed") {
+    const message = getErrorMessage(error) || fallback;
+    if (getErrorStatus(error) === 401) {
+      handleSessionExpired();
+      return;
+    }
+    setStatus(message);
+    showToast(message, "error");
+  }
+
   function openAdd(slot: MealSlot) {
     setActiveMealSlot(slot);
     setIsFoodListOpen(false);
@@ -1497,16 +1571,18 @@ export default function TrackFoodApp() {
   }
 
   async function saveSelectedFood() {
-    if (!selectedFood) {
+    if (!selectedFood || isSavingMeal) {
       return;
     }
     if (!token) {
       setStatus("Register or login to save meals in the database");
+      showToast("Login to save meals", "error");
       navigate("profile");
       return;
     }
 
     try {
+      setIsSavingMeal(true);
       const meal = await apiRequest<MealLog>(
         "/api/v1/meals",
         {
@@ -1525,27 +1601,35 @@ export default function TrackFoodApp() {
       setGrams("100");
       setPackageMultiplier("1");
       setStatus("Added to diary");
+      showToast("Saved to diary", "success", {
+        label: "Undo",
+        run: () => void deleteMeal(meal.id, { silent: true }),
+      });
       navigate("diary");
     } catch (error) {
-      setStatus(getErrorMessage(error));
+      handleSaveError(error, "Could not save meal");
+    } finally {
+      setIsSavingMeal(false);
     }
   }
 
   function toggleSavedFood(food: FoodItem) {
-    setSavedFoodIds((current) =>
-      current.includes(food.id)
-        ? current.filter((id) => id !== food.id)
-        : [food.id, ...current].slice(0, 24),
-    );
+    setSavedFoodIds((current) => {
+      const isSaved = current.includes(food.id);
+      showToast(isSaved ? "Removed from saved meals" : "Saved meal shortcut", "success");
+      return isSaved ? current.filter((id) => id !== food.id) : [food.id, ...current].slice(0, 24);
+    });
   }
 
   async function quickRelog(food: FoodItem, slot = activeMealSlot) {
     if (!token) {
       navigate("profile");
       setStatus("Login to relog meals");
+      showToast("Login to relog meals", "error");
       return;
     }
     try {
+      setIsSavingMeal(true);
       const meal = await apiRequest<MealLog>(
         "/api/v1/meals",
         {
@@ -1560,8 +1644,14 @@ export default function TrackFoodApp() {
       );
       setMeals((current) => [meal, ...current]);
       setStatus(`${foodTitle(food)} relogged`);
+      showToast("Relogged", "success", {
+        label: "Undo",
+        run: () => void deleteMeal(meal.id, { silent: true }),
+      });
     } catch (error) {
-      setStatus(getErrorMessage(error));
+      handleSaveError(error, "Could not relog meal");
+    } finally {
+      setIsSavingMeal(false);
     }
   }
 
@@ -1573,10 +1663,11 @@ export default function TrackFoodApp() {
   }
 
   async function saveEditedMeal() {
-    if (!token || !editingMeal) {
+    if (!token || !editingMeal || isSavingMeal) {
       return;
     }
     try {
+      setIsSavingMeal(true);
       const updated = await apiRequest<MealLog>(
         `/api/v1/meals/${editingMeal.id}`,
         {
@@ -1594,16 +1685,20 @@ export default function TrackFoodApp() {
       );
       setEditingMeal(null);
       setStatus("Meal updated");
+      showToast("Meal updated", "success");
     } catch (error) {
-      setStatus(getErrorMessage(error));
+      handleSaveError(error, "Could not update meal");
+    } finally {
+      setIsSavingMeal(false);
     }
   }
 
   async function duplicateMeal(mealId = editingMeal?.id) {
-    if (!token || !mealId) {
+    if (!token || !mealId || isSavingMeal) {
       return;
     }
     try {
+      setIsSavingMeal(true);
       const duplicated = await apiRequest<MealLog>(
         `/api/v1/meals/${mealId}/duplicate`,
         { method: "POST" },
@@ -1612,12 +1707,18 @@ export default function TrackFoodApp() {
       setMeals((current) => [duplicated, ...current]);
       setEditingMeal(null);
       setStatus("Meal duplicated");
+      showToast("Meal duplicated", "success", {
+        label: "Undo",
+        run: () => void deleteMeal(duplicated.id, { silent: true }),
+      });
     } catch (error) {
-      setStatus(getErrorMessage(error));
+      handleSaveError(error, "Could not duplicate meal");
+    } finally {
+      setIsSavingMeal(false);
     }
   }
 
-  async function deleteMeal(mealId: string) {
+  async function deleteMeal(mealId: string, options: { silent?: boolean } = {}) {
     if (!token) {
       return;
     }
@@ -1633,8 +1734,11 @@ export default function TrackFoodApp() {
         setEditingMeal(null);
       }
       setStatus("Meal removed");
+      if (!options.silent) {
+        showToast("Meal removed", "success");
+      }
     } catch (error) {
-      setStatus(getErrorMessage(error));
+      handleSaveError(error, "Could not remove meal");
     }
   }
 
@@ -1781,11 +1885,12 @@ export default function TrackFoodApp() {
 
   async function saveProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!token) {
+    if (!token || isSavingProfile) {
       return;
     }
 
     try {
+      setIsSavingProfile(true);
       const updated = await apiRequest<PublicProfile>(
         "/api/v1/profile",
         {
@@ -1808,8 +1913,11 @@ export default function TrackFoodApp() {
       });
       window.localStorage.setItem("trackfood-profile", JSON.stringify(updated));
       setStatus("Profile saved");
+      showToast("Profile saved", "success");
     } catch (error) {
-      setStatus(getErrorMessage(error));
+      handleSaveError(error, "Could not save profile");
+    } finally {
+      setIsSavingProfile(false);
     }
   }
 
@@ -1819,6 +1927,7 @@ export default function TrackFoodApp() {
     }
 
     try {
+      setIsSavingProfile(true);
       const avatar_data_url = await resizeAvatar(file);
       const updated = await apiRequest<PublicProfile>(
         "/api/v1/profile",
@@ -1831,8 +1940,11 @@ export default function TrackFoodApp() {
       setProfile(updated);
       window.localStorage.setItem("trackfood-profile", JSON.stringify(updated));
       setStatus("Avatar updated");
+      showToast("Avatar saved", "success");
     } catch (error) {
-      setStatus(getErrorMessage(error));
+      handleSaveError(error, "Could not save avatar");
+    } finally {
+      setIsSavingProfile(false);
     }
   }
 
@@ -1870,12 +1982,14 @@ export default function TrackFoodApp() {
     event.preventDefault();
     if (!token) {
       setStatus("Login to save calendar events to your planner database");
+      showToast("Login to save calendar plans", "error");
       navigate("profile");
       return;
     }
     const eventType = eventTypes.find((item) => item.id === calendarForm.event_type) ?? eventTypes[2];
 
     try {
+      setIsSavingCalendar(true);
       const created = await apiRequest<CalendarEvent>(
         "/api/v1/calendar/events",
         {
@@ -1893,8 +2007,14 @@ export default function TrackFoodApp() {
       setCalendarEvents((current) => [...current, created]);
       setCalendarForm((current) => ({ ...current, title: "", scheduled_time: "" }));
       setStatus("Calendar event saved");
+      showToast("Plan saved", "success", {
+        label: "Undo",
+        run: () => void deleteCalendarEvent(created.id, { silent: true }),
+      });
     } catch (error) {
-      setStatus(getErrorMessage(error));
+      handleSaveError(error, "Could not save plan");
+    } finally {
+      setIsSavingCalendar(false);
     }
   }
 
@@ -1915,12 +2035,13 @@ export default function TrackFoodApp() {
       setCalendarEvents((current) =>
         current.map((event) => (event.id === eventId ? updated : event)),
       );
+      showToast("Plan updated", "success");
     } catch (error) {
-      setStatus(getErrorMessage(error));
+      handleSaveError(error, "Could not update plan");
     }
   }
 
-  async function deleteCalendarEvent(eventId: string) {
+  async function deleteCalendarEvent(eventId: string, options: { silent?: boolean } = {}) {
     if (!token) {
       return;
     }
@@ -1933,8 +2054,11 @@ export default function TrackFoodApp() {
       );
       setCalendarEvents((current) => current.filter((event) => event.id !== eventId));
       setStatus("Calendar event removed");
+      if (!options.silent) {
+        showToast("Plan removed", "success");
+      }
     } catch (error) {
-      setStatus(getErrorMessage(error));
+      handleSaveError(error, "Could not remove plan");
     }
   }
 
@@ -1952,6 +2076,11 @@ export default function TrackFoodApp() {
 
   async function handlePhotoEstimate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!photoPreview) {
+      setStatus("Add photo first");
+      showToast("Add photo first", "error");
+      return;
+    }
     const description = estimateText.trim() || "photo food estimate";
     setEstimateText(description);
     try {
@@ -2017,11 +2146,27 @@ export default function TrackFoodApp() {
     }
   }
 
+  function buildQuickPrompt(kind: "estimate" | "plan" | "next") {
+    const latestMeals = meals
+      .slice(0, 4)
+      .map((meal) => `${meal.meal_slot}: ${foodTitle(meal.food)} (${formatKcal(meal.calories)})`)
+      .join("; ") || "none";
+    const remainingLabel = formatKcal(remaining);
+    if (kind === "estimate") {
+      return `I want to estimate and add a meal to my diary. My goal is ${formatKcal(goal)}, I have eaten ${formatKcal(totals.calories)} today, remaining ${remainingLabel}. Recent meals: ${latestMeals}. Ask me only the missing grams/serving details, then suggest exactly what to log.`;
+    }
+    if (kind === "plan") {
+      return `Plan the rest of my day using my diary and calendar. Goal: ${formatKcal(goal)}. Eaten today: ${formatKcal(totals.calories)}. Remaining: ${remainingLabel}. Meals logged: ${latestMeals}. Give a concrete meal plan and mention if I should add a calendar reminder.`;
+    }
+    return `What should I eat next based on my current diary? Goal: ${formatKcal(goal)}. Eaten: ${formatKcal(totals.calories)}. Remaining: ${remainingLabel}. Protein so far: ${totals.protein}g. Recent meals: ${latestMeals}. Suggest one specific option with estimated grams and macros.`;
+  }
+
   async function createAssistantContext() {
     if (!token) {
       return;
     }
     try {
+      setIsSavingContext(true);
       const context = await apiRequest<AssistantContext>(
         "/api/v1/assistant/contexts",
         {
@@ -2035,8 +2180,12 @@ export default function TrackFoodApp() {
       setContextTitle(context.title);
       setAssistantMessages([]);
       setAssistantError("");
+      showToast("Context created", "success");
     } catch (error) {
       setAssistantError(getErrorMessage(error));
+      handleSaveError(error, "Could not create context");
+    } finally {
+      setIsSavingContext(false);
     }
   }
 
@@ -2048,10 +2197,11 @@ export default function TrackFoodApp() {
   }
 
   async function saveAssistantContextTitle() {
-    if (!token || !activeAssistantContextId) {
+    if (!token || !activeAssistantContextId || isSavingContext) {
       return;
     }
     try {
+      setIsSavingContext(true);
       const context = await apiRequest<AssistantContext>(
         `/api/v1/assistant/contexts/${activeAssistantContextId}`,
         {
@@ -2064,16 +2214,21 @@ export default function TrackFoodApp() {
         current.map((item) => (item.id === context.id ? context : item)),
       );
       setContextTitle(context.title);
+      showToast("Context saved", "success");
     } catch (error) {
       setAssistantError(getErrorMessage(error));
+      handleSaveError(error, "Could not save context");
+    } finally {
+      setIsSavingContext(false);
     }
   }
 
   async function deleteAssistantContext() {
-    if (!token || !activeAssistantContextId || assistantContexts.length <= 1) {
+    if (!token || !activeAssistantContextId || assistantContexts.length <= 1 || isSavingContext) {
       return;
     }
     try {
+      setIsSavingContext(true);
       await apiRequest(
         `/api/v1/assistant/contexts/${activeAssistantContextId}`,
         { method: "DELETE" },
@@ -2085,8 +2240,12 @@ export default function TrackFoodApp() {
       setActiveAssistantContextId(nextContext?.id ?? null);
       setContextTitle(nextContext?.title ?? "New context");
       await refreshAssistant(token, nextContext?.id ?? null);
+      showToast("Context deleted", "success");
     } catch (error) {
       setAssistantError(getErrorMessage(error));
+      handleSaveError(error, "Could not delete context");
+    } finally {
+      setIsSavingContext(false);
     }
   }
 
@@ -2114,7 +2273,6 @@ export default function TrackFoodApp() {
         status={status}
         authMode={authMode}
         authForm={authForm}
-        onThemeChange={setTheme}
         onAuthModeChange={setAuthMode}
         onAuthFormChange={setAuthForm}
         onSubmit={handleAuth}
@@ -2196,7 +2354,7 @@ export default function TrackFoodApp() {
               goal={goal}
               onClick={() => navigate("profile")}
             />
-            <ThemeToggle theme={theme} onChange={setTheme} />
+            <span className="dark-only-pill">Dark beta</span>
           </div>
         </header>
 
@@ -2428,8 +2586,8 @@ export default function TrackFoodApp() {
                   }
                 />
               </label>
-              <button type="submit" className="primary-button wide">
-                Save plan
+              <button type="submit" className="primary-button wide" disabled={isSavingCalendar}>
+                {isSavingCalendar ? "Saving..." : "Save plan"}
               </button>
             </form>
 
@@ -2561,8 +2719,8 @@ export default function TrackFoodApp() {
                       <span>Tap to add food photo</span>
                     )}
                   </label>
-                  <button type="submit" className="primary-button wide">
-                    Estimate and match
+              <button type="submit" className="primary-button wide">
+                {photoPreview ? "Estimate and match" : "Add photo first"}
                   </button>
                 </form>
                 {estimate && (
@@ -2757,6 +2915,9 @@ export default function TrackFoodApp() {
                     </button>
                   ))}
                 </div>
+                <small className="serving-note">
+                  Base: {selectedFood.serving_label || "per 100g"} · values recalculate before save.
+                </small>
                 {servingMode === "grams" && (
                   <div className="portion-tools">
                     <label className="quantity-field">
@@ -2823,13 +2984,23 @@ export default function TrackFoodApp() {
                   <button type="button" className="secondary-button" onClick={() => toggleSavedFood(selectedFood)}>
                     {savedFoodIds.includes(selectedFood.id) ? "Saved" : "Save meal"}
                   </button>
-                  <button type="button" className="secondary-button" onClick={() => void quickRelog(selectedFood)}>
-                    One-tap relog
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => void quickRelog(selectedFood)}
+                    disabled={isSavingMeal}
+                  >
+                    {isSavingMeal ? "Saving..." : "One-tap relog"}
                   </button>
                 </div>
                 <div className="sticky-save-bar">
-                  <button type="button" className="primary-button wide" onClick={saveSelectedFood}>
-                    Save to diary
+                  <button
+                    type="button"
+                    className="primary-button wide"
+                    onClick={saveSelectedFood}
+                    disabled={isSavingMeal}
+                  >
+                    {isSavingMeal ? "Saving..." : "Save to diary"}
                   </button>
                 </div>
                 {money(selectedFood) && <small className="price-note">{money(selectedFood)}</small>}
@@ -2885,16 +3056,16 @@ export default function TrackFoodApp() {
 
             <div className="prompt-row">
               {[
-                "Estimate this meal",
-                "Plan my day",
-                "What should I eat next?",
-              ].map((prompt) => (
+                { label: "Estimate this meal", prompt: buildQuickPrompt("estimate") },
+                { label: "Plan my day", prompt: buildQuickPrompt("plan") },
+                { label: "What should I eat next?", prompt: buildQuickPrompt("next") },
+              ].map((item) => (
                 <button
-                  key={prompt}
+                  key={item.label}
                   type="button"
-                  onClick={() => void handleAssistantSubmit(undefined, prompt)}
+                  onClick={() => void handleAssistantSubmit(undefined, item.prompt)}
                 >
-                  {prompt}
+                  {item.label}
                 </button>
               ))}
             </div>
@@ -2945,14 +3116,19 @@ export default function TrackFoodApp() {
               />
             </label>
             <div className="context-actions">
-              <button type="button" className="secondary-button" onClick={() => void saveAssistantContextTitle()}>
-                Save
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => void saveAssistantContextTitle()}
+                disabled={isSavingContext}
+              >
+                {isSavingContext ? "Saving..." : "Save"}
               </button>
               <button
                 type="button"
                 className="secondary-button danger-soft"
                 onClick={() => void deleteAssistantContext()}
-                disabled={assistantContexts.length <= 1}
+                disabled={assistantContexts.length <= 1 || isSavingContext}
               >
                 Delete
               </button>
@@ -3077,7 +3253,7 @@ export default function TrackFoodApp() {
                 )}
               </label>
               <button type="submit" className="secondary-button wide">
-                Trial estimate
+                {photoPreview ? "Estimate and match" : "Add photo first"}
               </button>
             </form>
           </section>
@@ -3286,8 +3462,8 @@ export default function TrackFoodApp() {
                   </select>
                 </label>
               </div>
-              <button type="submit" className="primary-button wide">
-                Save profile
+              <button type="submit" className="primary-button wide" disabled={isSavingProfile}>
+                {isSavingProfile ? "Saving..." : "Save profile"}
               </button>
             </form>
             <p className="status-text">{status}</p>
@@ -3363,20 +3539,50 @@ export default function TrackFoodApp() {
                 <button type="button" className="secondary-button" onClick={() => toggleSavedFood(editingMeal.food)}>
                   {savedFoodIds.includes(editingMeal.food.id) ? "Saved meal" : "Save as meal"}
                 </button>
-                <button type="button" className="secondary-button" onClick={() => void duplicateMeal()}>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => void duplicateMeal()}
+                  disabled={isSavingMeal}
+                >
                   Duplicate
                 </button>
                 <button type="button" className="danger-soft secondary-button" onClick={() => void deleteMeal(editingMeal.id)}>
                   Delete
                 </button>
               </div>
-              <button type="button" className="primary-button wide" onClick={() => void saveEditedMeal()}>
-                Save changes
+              <button
+                type="button"
+                className="primary-button wide"
+                onClick={() => void saveEditedMeal()}
+                disabled={isSavingMeal}
+              >
+                {isSavingMeal ? "Saving..." : "Save changes"}
               </button>
             </section>
           </div>
         )}
       </div>
+
+      {toast && (
+        <div className={`toast toast-${toast.tone}`} role="status" aria-live="polite">
+          <span>{toast.message}</span>
+          {toast.actionLabel && toast.onAction && (
+            <button
+              type="button"
+              onClick={() => {
+                toast.onAction?.();
+                setToast(null);
+              }}
+            >
+              {toast.actionLabel}
+            </button>
+          )}
+          <button type="button" aria-label="Dismiss" onClick={() => setToast(null)}>
+            ×
+          </button>
+        </div>
+      )}
 
       <BottomNav activeTab={activeTab} onNavigate={navigate} />
     </main>

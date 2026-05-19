@@ -37,6 +37,11 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
 a {
   color: inherit;
   text-decoration: none;
@@ -578,7 +583,8 @@ img {
 }
 
 .account-chip,
-.sync-pill {
+.sync-pill,
+.dark-only-pill {
   display: inline-flex;
   min-height: 34px;
   max-width: 220px;
@@ -595,6 +601,12 @@ img {
   text-overflow: ellipsis;
   white-space: nowrap;
   backdrop-filter: blur(18px);
+}
+
+.dark-only-pill {
+  flex: 0 0 auto;
+  padding: 0 12px;
+  color: var(--accent);
 }
 
 .account-chip span:not(.avatar-bubble) {
@@ -1716,6 +1728,14 @@ p {
   font-weight: 740;
 }
 
+.serving-note {
+  display: block;
+  color: var(--quiet);
+  font-size: 0.8rem;
+  font-weight: 760;
+  line-height: 1.4;
+}
+
 .sticky-save-bar {
   position: sticky;
   bottom: 12px;
@@ -2505,6 +2525,50 @@ p {
   display: none;
 }
 
+.toast {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 120;
+  display: flex;
+  max-width: min(420px, calc(100vw - 24px));
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--surface-strong) 92%, transparent);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  padding: 10px 12px;
+  backdrop-filter: blur(22px);
+}
+
+.toast span {
+  min-width: 0;
+  flex: 1;
+  font-size: 0.9rem;
+  font-weight: 820;
+  line-height: 1.25;
+}
+
+.toast button {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font-weight: 840;
+  padding: 0 10px;
+}
+
+.toast-success {
+  border-color: color-mix(in srgb, var(--accent) 44%, var(--line));
+}
+
+.toast-error {
+  border-color: color-mix(in srgb, var(--coral) 54%, var(--line));
+}
+
 @media (max-width: 1080px) {
   .app-shell {
     --rail-width: 0px;
@@ -2717,6 +2781,12 @@ p {
     box-shadow: var(--shadow);
     padding: 6px;
     backdrop-filter: blur(22px);
+  }
+
+  .toast {
+    right: 12px;
+    bottom: calc(92px + env(safe-area-inset-bottom));
+    left: 12px;
   }
 
   .bottom-nav button {

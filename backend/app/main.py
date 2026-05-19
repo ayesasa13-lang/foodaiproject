@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
 import hmac
+import ipaddress
 import os
 import re
 import secrets
@@ -45,6 +46,7 @@ ASSISTANT_DATABASE_URL = os.getenv("ASSISTANT_DATABASE_URL", DATABASE_URL)
 EXTERNAL_PRODUCTS_SQLITE = os.getenv("EXTERNAL_PRODUCTS_SQLITE", "")
 EXTERNAL_PRODUCTS_LIMIT = int(os.getenv("EXTERNAL_PRODUCTS_LIMIT", "30000"))
 EXTERNAL_PRODUCTS_REFRESH = os.getenv("EXTERNAL_PRODUCTS_REFRESH", "false").lower() == "true"
+APP_ENV = os.getenv("APP_ENV", "local")
 USE_MEMORY_STORAGE = DATABASE_URL.startswith("memory://")
 USE_MEMORY_PLANNER = USE_MEMORY_STORAGE or PLANNER_DATABASE_URL.startswith("memory://")
 USE_MEMORY_ASSISTANT = USE_MEMORY_STORAGE or ASSISTANT_DATABASE_URL.startswith("memory://")
@@ -1882,6 +1884,18 @@ def request_ip(request: Request) -> str:
     return (request.client.host if request.client else "unknown")[:80]
 
 
+def is_local_dev_ip(ip: str) -> bool:
+    try:
+        parsed = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip in {"localhost", "testserver", "backend", "frontend"}
+    return parsed.is_loopback or parsed.is_private or parsed.is_link_local
+
+
+def is_local_dev_request(request: Request) -> bool:
+    return APP_ENV in {"local", "dev", "development", "test"} and is_local_dev_ip(request_ip(request))
+
+
 def request_fingerprint(request: Request) -> str:
     explicit = request.headers.get("x-trackfood-fingerprint") or request.headers.get("x-station-id")
     if explicit:
@@ -2627,6 +2641,24 @@ app.add_middleware(
 async def harden_requests(request: Request, call_next):
     intruder = get_intruder_for_request(request)
     if intruder and intruder.is_blocked:
+        if is_local_dev_request(request):
+            unblock_intruder(intruder.id)
+        else:
+            log_security_event(
+                "blocked_request",
+                "critical",
+                request,
+                details="Blocked request from flagged fingerprint",
+            )
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Request blocked"},
+            )
+
+    intruder = None
+    if not is_local_dev_request(request):
+        intruder = get_intruder_for_request(request)
+    if intruder and intruder.is_blocked:
         log_security_event(
             "blocked_request",
             "critical",
@@ -2686,7 +2718,7 @@ async def harden_requests(request: Request, call_next):
         )
 
     response = await call_next(request)
-    if response.status_code in {401, 403}:
+    if response.status_code in {401, 403} and request.url.path.startswith("/api/v1/auth/"):
         flag_intruder(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
