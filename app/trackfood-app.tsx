@@ -163,7 +163,7 @@ type ToastState = {
 };
 
 const PRODUCT_PAGE_SIZE = 50;
-const SESSION_EXPIRED_MESSAGE = "Session expired. Login again to save changes.";
+const SESSION_EXPIRED_MESSAGE = "Session expired. Please login again.";
 
 const tabs: { id: TabId; label: string; short: string }[] = [
   { id: "home", label: "Main", short: "Main" },
@@ -388,6 +388,17 @@ class ApiError extends Error {
 
 function getErrorStatus(error: unknown) {
   return error instanceof ApiError ? error.status : null;
+}
+
+function isAuthExpiredError(error: unknown) {
+  const message = getErrorMessage(error).toLowerCase();
+  return (
+    getErrorStatus(error) === 401 ||
+    message.includes("invalid bearer token") ||
+    message.includes("missing bearer token") ||
+    message.includes("unauthorized") ||
+    message.includes("401")
+  );
 }
 
 function safeInitials(value: string) {
@@ -1236,7 +1247,6 @@ export default function TrackFoodApp() {
       setTheme("dark");
       window.localStorage.setItem("trackfood-theme", "dark");
       setToken(savedToken);
-      setProfile(savedProfile);
       if (savedFoodRaw) {
         try {
           setSavedFoodIds(JSON.parse(savedFoodRaw) as string[]);
@@ -1287,7 +1297,7 @@ export default function TrackFoodApp() {
             void refreshSecurity(savedToken, remoteProfile);
           })
           .catch((error) => {
-            if (getErrorStatus(error) === 401) {
+            if (isAuthExpiredError(error)) {
               handleSessionExpired();
               return;
             }
@@ -1298,7 +1308,13 @@ export default function TrackFoodApp() {
             setMeals(remoteMeals);
             setStatus("Synced");
           })
-          .catch((error) => setStatus(getErrorMessage(error)));
+          .catch((error) => {
+            if (isAuthExpiredError(error)) {
+              handleSessionExpired();
+              return;
+            }
+            setStatus(getErrorMessage(error));
+          });
         const calendarAnchor = new Date();
         const start = dateKey(new Date(calendarAnchor.getFullYear(), calendarAnchor.getMonth(), 1));
         const end = dateKey(new Date(calendarAnchor.getFullYear(), calendarAnchor.getMonth() + 2, 0));
@@ -1308,7 +1324,13 @@ export default function TrackFoodApp() {
           savedToken,
         )
           .then(setCalendarEvents)
-          .catch((error) => setStatus(getErrorMessage(error)));
+          .catch((error) => {
+            if (isAuthExpiredError(error)) {
+              handleSessionExpired();
+              return;
+            }
+            setStatus(getErrorMessage(error));
+          });
         void refreshAssistant(savedToken);
       } else {
         setStatus("Create account to sync");
@@ -1327,9 +1349,20 @@ export default function TrackFoodApp() {
 
   useEffect(() => {
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("/sw.js").catch(() => {
-        // Offline support is progressive; app still works without SW registration.
-      });
+      navigator.serviceWorker
+        .getRegistrations()
+        .then((registrations) => Promise.all(registrations.map((registration) => registration.unregister())))
+        .catch(() => {
+          // Cache cleanup is best-effort during beta development.
+        });
+    }
+    if ("caches" in window) {
+      window.caches
+        .keys()
+        .then((keys) => Promise.all(keys.map((key) => window.caches.delete(key))))
+        .catch(() => {
+          // Cache cleanup is best-effort during beta development.
+        });
     }
   }, []);
 
@@ -1430,6 +1463,10 @@ export default function TrackFoodApp() {
       setMeals(remoteMeals);
       setStatus("Synced");
     } catch (error) {
+      if (isAuthExpiredError(error)) {
+        handleSessionExpired();
+        return;
+      }
       setStatus(getErrorMessage(error));
     }
   }
@@ -1449,6 +1486,10 @@ export default function TrackFoodApp() {
       );
       setCalendarEvents(events);
     } catch (error) {
+      if (isAuthExpiredError(error)) {
+        handleSessionExpired();
+        return;
+      }
       setStatus(getErrorMessage(error));
     }
   }
@@ -1488,6 +1529,10 @@ export default function TrackFoodApp() {
       setAssistantMessages(messages);
       setAssistantError("");
     } catch (error) {
+      if (isAuthExpiredError(error)) {
+        handleSessionExpired();
+        return;
+      }
       setAssistantError(getErrorMessage(error));
     }
   }
@@ -1550,7 +1595,7 @@ export default function TrackFoodApp() {
 
   function handleSaveError(error: unknown, fallback = "Save failed") {
     const message = getErrorMessage(error) || fallback;
-    if (getErrorStatus(error) === 401) {
+    if (isAuthExpiredError(error)) {
       handleSessionExpired();
       return;
     }
