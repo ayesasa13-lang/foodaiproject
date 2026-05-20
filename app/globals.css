@@ -97,18 +97,22 @@ img {
 }
 
 .app-shell.theme-dark {
-  --page: #060a12;
-  --page-alt: #0b111d;
-  --surface: rgba(15, 20, 31, 0.82);
-  --surface-strong: #101724;
-  --surface-soft: #172131;
-  --text: #f5f5f7;
-  --muted: rgba(245, 245, 247, 0.66);
-  --quiet: rgba(245, 245, 247, 0.44);
-  --line: rgba(245, 245, 247, 0.14);
-  --line-soft: rgba(245, 245, 247, 0.09);
-  --button-bg: #f5f5f7;
-  --button-text: #050506;
+  --page: #070b0f;
+  --page-alt: #0b1118;
+  --surface: rgba(16, 24, 32, 0.86);
+  --surface-strong: #101820;
+  --surface-soft: #141d27;
+  --text: #f7fafc;
+  --muted: #9aa6b2;
+  --quiet: rgba(154, 166, 178, 0.72);
+  --line: rgba(247, 250, 252, 0.13);
+  --line-soft: rgba(247, 250, 252, 0.08);
+  --accent: #2fe28b;
+  --blue: #3ba7ff;
+  --coral: #ff6f61;
+  --amber: #ffd166;
+  --button-bg: #f7fafc;
+  --button-text: #070b0f;
   --shadow: 0 24px 90px rgba(0, 0, 0, 0.34);
   --shadow-soft: 0 12px 34px rgba(0, 0, 0, 0.22);
   color-scheme: dark;
@@ -585,6 +589,7 @@ img {
 .account-chip,
 .sync-pill,
 .dark-only-pill {
+  position: relative;
   display: inline-flex;
   min-height: 34px;
   max-width: 220px;
@@ -601,6 +606,21 @@ img {
   text-overflow: ellipsis;
   white-space: nowrap;
   backdrop-filter: blur(18px);
+}
+
+.account-chip {
+  padding-bottom: 7px;
+}
+
+.account-chip > i {
+  position: absolute;
+  bottom: 4px;
+  left: 44px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 78%, var(--blue));
+  max-width: calc(100% - 56px);
 }
 
 .dark-only-pill {
@@ -1390,6 +1410,7 @@ p {
 }
 
 .barcode-camera {
+  position: relative;
   display: grid;
   gap: 10px;
 }
@@ -1414,6 +1435,18 @@ p {
   font-weight: 740;
 }
 
+.scan-frame {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  left: 18px;
+  height: 96px;
+  pointer-events: none;
+  border: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  border-radius: 14px;
+  box-shadow: 0 0 0 999px rgba(0, 0, 0, 0.18);
+}
+
 .search-form {
   display: grid;
   gap: 8px;
@@ -1432,9 +1465,15 @@ p {
 }
 
 .search-form > div {
+  position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 8px;
+}
+
+.clear-search {
+  min-width: 48px;
+  padding: 0;
 }
 
 .search-form input,
@@ -1458,6 +1497,27 @@ p {
   transition:
     border-color 180ms ease,
     box-shadow 180ms ease;
+}
+
+.product-skeletons {
+  display: grid;
+  gap: 10px;
+}
+
+.product-skeletons span {
+  min-height: 76px;
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, transparent, color-mix(in srgb, var(--text) 5%, transparent), transparent),
+    var(--page-alt);
+  background-size: 220% 100%;
+  animation: shimmer 1.2s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  to {
+    background-position: -220% 0;
+  }
 }
 
 .estimate-form textarea {
@@ -1599,6 +1659,7 @@ p {
 
 .product-row {
   width: 100%;
+  min-height: 78px;
   min-width: 0;
   max-width: 100%;
   gap: 12px;
@@ -1645,8 +1706,8 @@ p {
 
 .add-dot {
   display: grid;
-  width: 34px;
-  height: 34px;
+  width: 44px;
+  height: 44px;
   place-items: center;
   border-radius: 999px;
   background: var(--text);
@@ -2525,6 +2586,10 @@ p {
   display: none;
 }
 
+.mobile-fab {
+  display: none;
+}
+
 .toast {
   position: fixed;
   right: 18px;
@@ -2616,6 +2681,24 @@ p {
     padding: 10px 12px calc(132px + env(safe-area-inset-bottom));
   }
 
+  .mobile-fab {
+    position: fixed;
+    right: 16px;
+    bottom: calc(86px + env(safe-area-inset-bottom));
+    z-index: 68;
+    display: inline-flex;
+    min-height: 52px;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid color-mix(in srgb, var(--accent) 54%, transparent);
+    border-radius: 999px;
+    background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--blue) 34%, var(--accent)));
+    box-shadow: var(--shadow);
+    color: #070b0f;
+    font-weight: 900;
+    padding: 0 18px;
+  }
+
   .guest-content {
     padding: 10px 12px 34px;
   }
@@ -2688,6 +2771,18 @@ p {
     padding: 14px;
   }
 
+  .search-layout.has-selection .add-panel {
+    position: fixed;
+    right: 10px;
+    bottom: calc(82px + env(safe-area-inset-bottom));
+    left: 10px;
+    z-index: 74;
+    max-height: calc(100svh - 112px);
+    overflow: auto;
+    border-radius: 22px 22px 16px 16px;
+    box-shadow: var(--shadow);
+  }
+
   .panel-heading {
     align-items: center;
   }
@@ -2710,6 +2805,13 @@ p {
   .search-form > div,
   .scanner-form label > div {
     grid-template-columns: 1fr;
+  }
+
+  .search-form .clear-search {
+    position: absolute;
+    right: 104px;
+    top: 0;
+    min-height: 48px;
   }
 
   .profile-panel {
@@ -2757,12 +2859,12 @@ p {
   }
 
   .add-dot {
-    width: 32px;
-    height: 32px;
+    width: 44px;
+    height: 44px;
   }
 
   .sticky-save-bar {
-    bottom: calc(86px + env(safe-area-inset-bottom));
+    bottom: 0;
     margin-top: 4px;
   }
 

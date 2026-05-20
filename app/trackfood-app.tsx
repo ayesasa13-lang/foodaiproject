@@ -162,6 +162,25 @@ type ToastState = {
   onAction?: () => void;
 };
 
+type DailyTotals = {
+  goal: number;
+  eaten: number;
+  remaining: number;
+  overGoal: number;
+  progressPercent: number;
+  mealCount: number;
+  macros: {
+    protein: number;
+    carbs: number;
+    fat: number;
+    fiber: number;
+  };
+};
+
+type AppStatus = {
+  products: number;
+};
+
 const PRODUCT_PAGE_SIZE = 50;
 const SESSION_EXPIRED_MESSAGE = "Session expired. Please login again.";
 
@@ -265,11 +284,51 @@ function clamp(value: number, min: number, max: number) {
 }
 
 function formatKcal(value: number) {
-  return `${Math.round(value).toLocaleString()} kcal`;
+  return `${new Intl.NumberFormat("en-US").format(Math.round(value))} kcal`;
+}
+
+function formatCount(value: number) {
+  return new Intl.NumberFormat("en-US", {
+    notation: value >= 10_000 ? "compact" : "standard",
+    maximumFractionDigits: value >= 10_000 ? 1 : 0,
+  }).format(value);
 }
 
 function formatMacro(value: number) {
   return `${Math.round(value)}g`;
+}
+
+function buildDailyTotals(meals: MealLog[], rawGoal: number): DailyTotals {
+  const goal = clamp(Math.round(rawGoal) || 1850, 1000, 6000);
+  const macros = meals.reduce(
+    (acc, meal) => ({
+      protein: acc.protein + meal.protein_g,
+      carbs: acc.carbs + meal.carbs_g,
+      fat: acc.fat + meal.fat_g,
+      fiber: acc.fiber + meal.fiber_g,
+    }),
+    { protein: 0, carbs: 0, fat: 0, fiber: 0 },
+  );
+  const eaten = meals.reduce((sum, meal) => sum + meal.calories, 0);
+  const delta = goal - eaten;
+
+  return {
+    goal,
+    eaten,
+    remaining: Math.max(delta, 0),
+    overGoal: Math.max(-delta, 0),
+    progressPercent: clamp(Math.round((eaten / goal) * 100), 0, 140),
+    mealCount: meals.length,
+    macros,
+  };
+}
+
+function dailyKcalLine(dailyTotals: DailyTotals, includeToday = true) {
+  const suffix = includeToday ? " today" : "";
+  if (dailyTotals.overGoal > 0) {
+    return `Over by ${formatKcal(dailyTotals.overGoal)}${suffix}`;
+  }
+  return `${formatKcal(dailyTotals.remaining)} left${suffix}`;
 }
 
 function dateKey(date: Date) {
@@ -573,6 +632,7 @@ function AccountChip({
           {formatKcal(calories)} / {formatKcal(goal)}
         </small>
       </span>
+      <i style={{ width: `${clamp(Math.round((calories / goal) * 100), 0, 100)}%` }} />
     </button>
   );
 }
@@ -997,7 +1057,7 @@ function GuestPreview({
             <span>TF</span>
             <strong>TrackFood AI</strong>
           </a>
-          <span className="dark-only-pill">Dark beta</span>
+          <span className="dark-only-pill">Private beta</span>
         </header>
 
         <div className="guest-grid">
@@ -1084,6 +1144,7 @@ export default function TrackFoodApp() {
   const [activeTab, setActiveTab] = useState<TabId>("home");
   const [isRailOpen, setIsRailOpen] = useState(true);
   const [foods, setFoods] = useState<FoodItem[]>(fallbackFoods);
+  const [indexedProducts, setIndexedProducts] = useState(0);
   const [meals, setMeals] = useState<MealLog[]>([]);
   const [profile, setProfile] = useState<PublicProfile | null>(null);
   const [token, setToken] = useState<string | null>(null);
@@ -1152,24 +1213,24 @@ export default function TrackFoodApp() {
     activityLevel: "balanced",
   });
 
-  const parsedGoal = Number(authForm.calorieGoal) || 1850;
-  const goal = profile?.calorie_goal ?? parsedGoal;
-  const totals = useMemo(
-    () =>
-      meals.reduce(
-        (acc, meal) => ({
-          calories: acc.calories + meal.calories,
-          protein: acc.protein + meal.protein_g,
-          carbs: acc.carbs + meal.carbs_g,
-          fat: acc.fat + meal.fat_g,
-          fiber: acc.fiber + meal.fiber_g,
-        }),
-        { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 },
-      ),
-    [meals],
+  const parsedGoal = Number(profileForm.calorieGoal || authForm.calorieGoal) || 1850;
+  const dailyTotals = useMemo(
+    () => buildDailyTotals(meals, profile?.calorie_goal ?? parsedGoal),
+    [meals, parsedGoal, profile?.calorie_goal],
   );
-  const progress = clamp(Math.round((totals.calories / goal) * 100), 0, 140);
-  const remaining = Math.max(goal - totals.calories, 0);
+  const goal = dailyTotals.goal;
+  const totals = {
+    calories: dailyTotals.eaten,
+    protein: dailyTotals.macros.protein,
+    carbs: dailyTotals.macros.carbs,
+    fat: dailyTotals.macros.fat,
+    fiber: dailyTotals.macros.fiber,
+  };
+  const progress = dailyTotals.progressPercent;
+  const remaining = dailyTotals.remaining;
+  const productIndexLabel = indexedProducts
+    ? `${formatCount(indexedProducts)} products indexed`
+    : "Product database ready";
   const stores = useMemo(
     () =>
       Array.from(new Set(foods.map((food) => food.store).filter(Boolean))).slice(0, 8) as string[],
@@ -1271,12 +1332,20 @@ export default function TrackFoodApp() {
         });
       }
 
+      void apiRequest<AppStatus>("/api/v1/status")
+        .then((appStatus) => {
+          setIndexedProducts(appStatus.products);
+        })
+        .catch(() => {
+          setIndexedProducts(0);
+        });
+
       void apiRequest<FoodItem[]>(`/api/v1/foods?limit=${PRODUCT_PAGE_SIZE}`)
         .then((items) => {
           setFoods(items.length ? dedupeFoods(items) : fallbackFoods);
           setFoodOffset(items.length);
           setCanLoadMoreFoods(items.length === PRODUCT_PAGE_SIZE);
-          setStatus(items.length > 10 ? `${items.length} products ready` : "Product database ready");
+          setStatus("Product database ready");
         })
         .catch((error) => {
           setFoods(fallbackFoods);
@@ -1373,6 +1442,23 @@ export default function TrackFoodApp() {
   }, [isHydrated, savedFoodIds]);
 
   useEffect(() => {
+    if (!isHydrated || activeTab !== "search") {
+      return;
+    }
+
+    const normalizedQuery = query.trim();
+    const timer = window.setTimeout(() => {
+      if (normalizedQuery.length >= 2 || storeFilter) {
+        void loadFoods(normalizedQuery, storeFilter, 0, { silent: true });
+      }
+    }, 360);
+
+    return () => window.clearTimeout(timer);
+    // loadFoods intentionally stays outside deps; this is a controlled debounce around query/store.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, isHydrated, query, storeFilter]);
+
+  useEffect(() => {
     if (!isHydrated || !token) {
       return;
     }
@@ -1435,11 +1521,7 @@ export default function TrackFoodApp() {
       setFoodOffset(nextOffset + items.length);
       setCanLoadMoreFoods(items.length === PRODUCT_PAGE_SIZE);
       if (!options.silent) {
-        setStatus(
-          items.length > 10
-            ? `${nextOffset + items.length}${items.length === PRODUCT_PAGE_SIZE ? "+" : ""} products`
-            : "Product database ready",
-        );
+        setStatus(items.length ? `${nextOffset + items.length} products shown` : "No products found");
       }
     } catch (error) {
       setFoods(fallbackFoods);
@@ -1666,7 +1748,7 @@ export default function TrackFoodApp() {
     });
   }
 
-  async function quickRelog(food: FoodItem, slot = activeMealSlot) {
+  async function quickRelog(food: FoodItem, slot = activeMealSlot, multiplier = 1) {
     if (!token) {
       navigate("profile");
       setStatus("Login to relog meals");
@@ -1682,7 +1764,7 @@ export default function TrackFoodApp() {
           body: JSON.stringify({
             food_id: food.id,
             meal_slot: slot,
-            serving_multiplier: 1,
+            serving_multiplier: multiplier,
           }),
         },
         token,
@@ -1690,8 +1772,8 @@ export default function TrackFoodApp() {
       setMeals((current) => [meal, ...current]);
       setStatus(`${foodTitle(food)} relogged`);
       showToast("Relogged", "success", {
-        label: "Undo",
-        run: () => void deleteMeal(meal.id, { silent: true }),
+          label: "Undo",
+          run: () => void deleteMeal(meal.id, { silent: true }),
       });
     } catch (error) {
       handleSaveError(error, "Could not relog meal");
@@ -1767,6 +1849,7 @@ export default function TrackFoodApp() {
     if (!token) {
       return;
     }
+    const removedMeal = meals.find((meal) => meal.id === mealId) ?? null;
 
     try {
       await apiRequest<{ status: string }>(
@@ -1780,7 +1863,12 @@ export default function TrackFoodApp() {
       }
       setStatus("Meal removed");
       if (!options.silent) {
-        showToast("Meal removed", "success");
+        showToast("Meal removed", "success", removedMeal ? {
+          label: "Undo",
+          run: () => {
+            void quickRelog(removedMeal.food, removedMeal.meal_slot, removedMeal.serving_multiplier);
+          },
+        } : undefined);
       }
     } catch (error) {
       handleSaveError(error, "Could not remove meal");
@@ -1797,6 +1885,7 @@ export default function TrackFoodApp() {
     setBarcodeScanError("");
     if (typeof window === "undefined" || !navigator.mediaDevices?.getUserMedia) {
       setBarcodeScanError("Camera is not available in this browser.");
+      setStatus("Use manual barcode input");
       return;
     }
     const BarcodeDetectorCtor = (
@@ -1808,6 +1897,7 @@ export default function TrackFoodApp() {
     ).BarcodeDetector;
     if (!BarcodeDetectorCtor) {
       setBarcodeScanError("Barcode camera scan is not supported here. Enter the barcode manually.");
+      setStatus("Manual barcode input ready");
       return;
     }
 
@@ -1817,6 +1907,7 @@ export default function TrackFoodApp() {
       });
       barcodeStreamRef.current = stream;
       setIsBarcodeScanning(true);
+      setStatus("Camera scanner active");
       const video = barcodeVideoRef.current;
       if (!video) {
         stopBarcodeScanner();
@@ -1847,6 +1938,7 @@ export default function TrackFoodApp() {
     } catch (error) {
       stopBarcodeScanner();
       setBarcodeScanError(getErrorMessage(error));
+      setStatus("Camera denied. Use manual barcode input.");
     }
   }
 
@@ -2140,7 +2232,7 @@ export default function TrackFoodApp() {
       if (matches[0]) {
         chooseFood(matches[0]);
       }
-      setStatus("Photo trial estimate ready");
+      setStatus("Photo estimate ready");
     } catch (error) {
       setStatus(getErrorMessage(error));
     }
@@ -2196,14 +2288,16 @@ export default function TrackFoodApp() {
       .slice(0, 4)
       .map((meal) => `${meal.meal_slot}: ${foodTitle(meal.food)} (${formatKcal(meal.calories)})`)
       .join("; ") || "none";
-    const remainingLabel = formatKcal(remaining);
+    const remainingLabel = dailyTotals.overGoal
+      ? `over goal by ${formatKcal(dailyTotals.overGoal)}`
+      : `${formatKcal(dailyTotals.remaining)} remaining`;
     if (kind === "estimate") {
-      return `I want to estimate and add a meal to my diary. My goal is ${formatKcal(goal)}, I have eaten ${formatKcal(totals.calories)} today, remaining ${remainingLabel}. Recent meals: ${latestMeals}. Ask me only the missing grams/serving details, then suggest exactly what to log.`;
+      return `Use my TrackFood diary context. I want to estimate and add a meal to my diary. Goal: ${formatKcal(dailyTotals.goal)}. Eaten today: ${formatKcal(dailyTotals.eaten)}. Balance: ${remainingLabel}. Recent meals: ${latestMeals}. Ask only for missing grams/serving details, then give one concrete log suggestion with meal slot, grams, kcal, and macros.`;
     }
     if (kind === "plan") {
-      return `Plan the rest of my day using my diary and calendar. Goal: ${formatKcal(goal)}. Eaten today: ${formatKcal(totals.calories)}. Remaining: ${remainingLabel}. Meals logged: ${latestMeals}. Give a concrete meal plan and mention if I should add a calendar reminder.`;
+      return `Use my TrackFood diary and calendar context. Plan the rest of my day. Goal: ${formatKcal(dailyTotals.goal)}. Eaten today: ${formatKcal(dailyTotals.eaten)}. Balance: ${remainingLabel}. Meals logged: ${latestMeals}. Give a concrete plan with times and tell me exactly what calendar reminder or meal I should add.`;
     }
-    return `What should I eat next based on my current diary? Goal: ${formatKcal(goal)}. Eaten: ${formatKcal(totals.calories)}. Remaining: ${remainingLabel}. Protein so far: ${totals.protein}g. Recent meals: ${latestMeals}. Suggest one specific option with estimated grams and macros.`;
+    return `Use my TrackFood diary context. What should I eat next? Goal: ${formatKcal(dailyTotals.goal)}. Eaten: ${formatKcal(dailyTotals.eaten)}. Balance: ${remainingLabel}. Protein so far: ${dailyTotals.macros.protein}g. Recent meals: ${latestMeals}. Suggest one specific option with estimated grams, kcal, macros, and whether I should add it to the diary.`;
   }
 
   async function createAssistantContext() {
@@ -2380,6 +2474,11 @@ export default function TrackFoodApp() {
       </aside>
 
       <div className="app-content">
+        {(activeTab === "home" || activeTab === "diary") && (
+          <button type="button" className="mobile-fab" onClick={() => openAdd("breakfast")}>
+            + Add food
+          </button>
+        )}
         <header className="topbar">
           <a
             className="mobile-brand"
@@ -2399,7 +2498,6 @@ export default function TrackFoodApp() {
               goal={goal}
               onClick={() => navigate("profile")}
             />
-            <span className="dark-only-pill">Dark beta</span>
           </div>
         </header>
 
@@ -2409,11 +2507,7 @@ export default function TrackFoodApp() {
               <div className="hero-copy">
                 <span className="eyebrow">Main menu</span>
                 <h1>{formatKcal(totals.calories)}</h1>
-                <p>
-                  {profile
-                    ? `${profile.name.split(" ")[0]}, ${formatKcal(remaining)} left today.`
-                    : "Create your account and TrackFood AI will sync diary, plans, and meals."}
-                </p>
+                <p>{dailyKcalLine(dailyTotals)}</p>
                 <button type="button" className="big-add-button" onClick={() => openAdd("breakfast")}>
                   + Add food
                 </button>
@@ -2448,7 +2542,7 @@ export default function TrackFoodApp() {
                 <HomeAction
                   label="Food DB"
                   title="Add product"
-                  detail={`${foods.length} loaded`}
+                  detail={productIndexLabel}
                   onClick={() => openAdd("breakfast")}
                 />
                 <HomeAction
@@ -2460,7 +2554,7 @@ export default function TrackFoodApp() {
                 <HomeAction
                   label="Scan"
                   title="Barcode/photo"
-                  detail="Trial scanner"
+                  detail={photoPreview ? "Photo ready" : "Scan food"}
                   onClick={() => navigate("insights")}
                 />
               </div>
@@ -2469,13 +2563,13 @@ export default function TrackFoodApp() {
             <section className="panel summary-panel">
               <div className="panel-heading">
                 <div>
-                  <span className="eyebrow">Daily summary</span>
-                  <h2>{formatKcal(goal)} goal</h2>
+                  <span className="eyebrow">Macro dashboard</span>
+                  <h2>{dailyTotals.mealCount} meals logged</h2>
                 </div>
               </div>
               <div className="stats-grid">
-                <StatTile label="Remaining" value={formatKcal(remaining)} detail="today" />
-                <StatTile label="Meals" value={String(meals.length)} detail="logged" />
+                <StatTile label="Protein" value={`${totals.protein}g`} detail="tracked" />
+                <StatTile label="Carbs" value={`${totals.carbs}g`} detail="tracked" />
                 <StatTile label="Fiber" value={`${totals.fiber}g`} detail="tracked" />
               </div>
               <div className="macro-stack">
@@ -2489,7 +2583,9 @@ export default function TrackFoodApp() {
                   {meals.slice(0, 3).map((meal) => (
                     <button key={meal.id} type="button" onClick={() => openMealEditor(meal)}>
                       <strong>{foodTitle(meal.food)}</strong>
-                      <small>{formatKcal(meal.calories)}</small>
+                      <small>
+                        {new Date(meal.logged_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · {meal.meal_slot} · {formatKcal(meal.calories)}
+                      </small>
                     </button>
                   ))}
                 </div>
@@ -2504,11 +2600,7 @@ export default function TrackFoodApp() {
             <div className="hero-copy">
               <span className="eyebrow">Today</span>
               <h1>{formatKcal(totals.calories)}</h1>
-              <p>
-                {profile
-                  ? `${profile.name.split(" ")[0]}, ${formatKcal(remaining)} left.`
-                  : "Create an account and every meal will stay in Postgres."}
-              </p>
+              <p>{dailyKcalLine(dailyTotals, false)}</p>
             </div>
             <div
               className="calorie-orbit"
@@ -2550,13 +2642,13 @@ export default function TrackFoodApp() {
           <section className="panel summary-panel">
             <div className="panel-heading">
               <div>
-                <span className="eyebrow">Daily summary</span>
-                <h2>{formatKcal(goal)} goal</h2>
+                <span className="eyebrow">Macro dashboard</span>
+                <h2>{formatKcal(goal)} daily goal</h2>
               </div>
             </div>
             <div className="stats-grid">
-              <StatTile label="Remaining" value={formatKcal(remaining)} detail="today" />
-              <StatTile label="Meals" value={String(meals.length)} detail="logged" />
+              <StatTile label="Balance" value={dailyTotals.overGoal ? `+${formatKcal(dailyTotals.overGoal)}` : formatKcal(remaining)} detail={dailyTotals.overGoal ? "over goal" : "left"} />
+              <StatTile label="Meals" value={String(dailyTotals.mealCount)} detail="logged" />
               <StatTile label="Fiber" value={`${totals.fiber}g`} detail="tracked" />
             </div>
             <div className="macro-stack">
@@ -2724,6 +2816,7 @@ export default function TrackFoodApp() {
                 </form>
                 <div className="barcode-camera">
                   <video ref={barcodeVideoRef} muted playsInline />
+                  <span className="scan-frame" aria-hidden="true" />
                   <div>
                     <button
                       type="button"
@@ -2739,7 +2832,10 @@ export default function TrackFoodApp() {
                       </button>
                     )}
                   </div>
-                  {barcodeScanError && <small>{barcodeScanError}</small>}
+                  <small>
+                    {barcodeScanError ||
+                      (isBarcodeScanning ? "Point the frame at the barcode." : "Camera scan or manual code.")}
+                  </small>
                 </div>
               </section>
             )}
@@ -2764,14 +2860,33 @@ export default function TrackFoodApp() {
                       <span>Tap to add food photo</span>
                     )}
                   </label>
-              <button type="submit" className="primary-button wide">
-                {photoPreview ? "Estimate and match" : "Add photo first"}
+                  {photoPreview && (
+                    <button
+                      type="button"
+                      className="secondary-button wide"
+                      onClick={() => {
+                        setPhotoPreview(null);
+                        setEstimate(null);
+                      }}
+                    >
+                      Retake photo
+                    </button>
+                  )}
+              <button type="submit" className="primary-button wide" disabled={!photoPreview}>
+                {photoPreview ? "Estimate food" : "Add photo first"}
                   </button>
                 </form>
                 {estimate && (
                   <div className="estimate-result compact-result">
                     <strong>{estimate.label}</strong>
-                    <span>{formatKcal(estimate.calories)} ready to confirm</span>
+                    <span>
+                      {formatKcal(estimate.calories)} · {Math.round(estimate.confidence * 100)}% confidence
+                    </span>
+                    {selectedFood && (
+                      <button type="button" className="secondary-button" onClick={saveSelectedFood}>
+                        Add matched food
+                      </button>
+                    )}
                   </div>
                 )}
               </section>
@@ -2786,7 +2901,22 @@ export default function TrackFoodApp() {
                   onChange={(event) => setQuery(event.target.value)}
                   placeholder="Danone, arroz, pollo, Mercadona..."
                 />
-                <button type="submit">Search</button>
+                {query && (
+                  <button
+                    type="button"
+                    className="clear-search"
+                    aria-label="Clear search"
+                    onClick={() => {
+                      setQuery("");
+                      void loadFoods("", storeFilter, 0, { silent: true });
+                    }}
+                  >
+                    ×
+                  </button>
+                )}
+                <button type="submit" disabled={isFoodLoading}>
+                  {isFoodLoading ? "Searching..." : "Search"}
+                </button>
               </div>
             </form>
 
@@ -2865,10 +2995,12 @@ export default function TrackFoodApp() {
                 <strong>
                   {isFoodLoading
                     ? "Loading products..."
-                    : `${foods.length}${canLoadMoreFoods ? "+" : ""} products`}
+                    : `${foods.length} shown${canLoadMoreFoods ? "+" : ""}`}
                 </strong>
                 <small>
-                  {lastFoodQuery ? `Search: ${lastFoodQuery}` : "Local database"}
+                  {lastFoodQuery
+                    ? `Search: ${lastFoodQuery} · ${productIndexLabel}`
+                    : productIndexLabel}
                 </small>
               </div>
               <button type="button" onClick={() => setIsFoodListOpen((current) => !current)}>
@@ -2879,6 +3011,13 @@ export default function TrackFoodApp() {
             {isFoodListOpen ? (
               <div className="product-list">
                 {foodSearchError && <div className="empty-state compact">{foodSearchError}</div>}
+                {isFoodLoading && !foods.length && (
+                  <div className="product-skeletons" aria-label="Loading products">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                )}
                 {!foodSearchError && !foods.length && !isFoodLoading && (
                   <div className="empty-state compact">No products found. Try another name or barcode.</div>
                 )}
@@ -2897,7 +3036,7 @@ export default function TrackFoodApp() {
                 className="collapsed-results"
                 onClick={() => setIsFoodListOpen(true)}
               >
-                Product list hidden. Tap to show {foods.length}{canLoadMoreFoods ? "+" : ""} products.
+                Product list hidden. Tap to show {foods.length}{canLoadMoreFoods ? "+" : ""} shown products.
               </button>
             )}
           </section>
@@ -3109,6 +3248,7 @@ export default function TrackFoodApp() {
                   key={item.label}
                   type="button"
                   onClick={() => void handleAssistantSubmit(undefined, item.prompt)}
+                  disabled={isAssistantLoading}
                 >
                   {item.label}
                 </button>
@@ -3122,7 +3262,7 @@ export default function TrackFoodApp() {
                 placeholder="Ask for a meal idea, shopping choice, or calendar plan..."
               />
               <button type="submit" className="primary-button" disabled={isAssistantLoading}>
-                Send
+                {isAssistantLoading ? "Thinking..." : "Send"}
               </button>
             </form>
           </section>
@@ -3199,7 +3339,7 @@ export default function TrackFoodApp() {
                 <span className="eyebrow">Stats</span>
                 <h2>Today&apos;s signal</h2>
               </div>
-              <strong>{progress}%</strong>
+              <strong>{dailyTotals.progressPercent}%</strong>
             </div>
             <div className="insight-rings">
               <div
@@ -3217,7 +3357,13 @@ export default function TrackFoodApp() {
                 <MacroLine label="Protein" value={totals.protein} goal={140} color="#2bb673" />
                 <MacroLine label="Carbs" value={totals.carbs} goal={240} color="#4f86f7" />
                 <MacroLine label="Fat" value={totals.fat} goal={70} color="#ff795e" />
+                <MacroLine label="Fiber" value={totals.fiber} goal={30} color="#2FE28B" />
               </div>
+            </div>
+            <div className="stats-grid">
+              <StatTile label="7-day avg" value={formatKcal(Math.round(weekActivity.reduce((sum, day) => sum + day.calories, 0) / 7))} detail="calories" />
+              <StatTile label="Consistency" value={`${weekActivity.filter((day) => day.calories > 0).length}/7`} detail="days logged" />
+              <StatTile label="Balance" value={dailyKcalLine(dailyTotals, false)} detail="today" />
             </div>
             <div className="week-bars" aria-label="Weekly calories">
               {weekActivity.map((day) => (
@@ -3298,7 +3444,7 @@ export default function TrackFoodApp() {
                 )}
               </label>
               <button type="submit" className="secondary-button wide">
-                {photoPreview ? "Estimate and match" : "Add photo first"}
+                {photoPreview ? "Estimate food" : "Add photo first"}
               </button>
             </form>
           </section>
@@ -3307,11 +3453,10 @@ export default function TrackFoodApp() {
             <span className="eyebrow">Scanner status</span>
             <h2>{photoPreview ? "Photo ready" : barcodeText ? "Barcode ready" : "Ready to scan"}</h2>
             <p>
-              Use barcode search for products from your database or photo trial for a quick
-              nutrition estimate.
+              Use barcode search for exact products, or upload a photo before estimate. No photo means no estimate.
             </p>
             <div className="stats-grid">
-              <StatTile label="Products" value={String(foods.length)} detail="loaded" />
+              <StatTile label="Products" value={formatCount(indexedProducts || foods.length)} detail={indexedProducts ? "indexed" : "shown"} />
               <StatTile label="Estimate" value={estimate ? estimate.label : "None"} detail="latest" />
               <StatTile label="Source" value="DB" detail="local" />
             </div>
@@ -3346,9 +3491,9 @@ export default function TrackFoodApp() {
               <StatTile
                 label="Today"
                 value={formatKcal(totals.calories)}
-                detail={`${formatKcal(remaining)} left`}
+                detail={dailyKcalLine(dailyTotals, false)}
               />
-              <StatTile label="Meals" value={String(meals.length)} detail="logged today" />
+              <StatTile label="Meals" value={String(dailyTotals.mealCount)} detail="logged today" />
               <StatTile label="Plans" value={String(selectedDayEvents.length)} detail={selectedDate} />
               <StatTile
                 label="Routine"
@@ -3385,20 +3530,16 @@ export default function TrackFoodApp() {
             </div>
 
             <div className="data-controls compact-controls">
+              <div>
+                <span className="eyebrow">Units</span>
+                <strong>Metric</strong>
+                <small>grams / kg · language selector hidden until full localization.</small>
+              </div>
               <label>
                 Units
                 <select defaultValue="metric">
                   <option value="metric">Metric · grams / kg</option>
                   <option value="imperial">Imperial · oz / lb</option>
-                </select>
-              </label>
-              <label>
-                Language
-                <select defaultValue="auto">
-                  <option value="auto">Auto</option>
-                  <option value="ru">Russian</option>
-                  <option value="en">English</option>
-                  <option value="es">Spanish</option>
                 </select>
               </label>
             </div>
