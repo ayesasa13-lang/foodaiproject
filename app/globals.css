@@ -1868,7 +1868,29 @@ p {
 }
 
 .assistant-panel {
+  position: relative;
   min-height: min(760px, calc(100svh - 130px));
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 16% -8%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 32%),
+    radial-gradient(circle at 100% 12%, color-mix(in srgb, var(--blue) 12%, transparent), transparent 36%),
+    linear-gradient(180deg, color-mix(in srgb, var(--surface) 94%, transparent), color-mix(in srgb, var(--page-alt) 96%, transparent));
+}
+
+.assistant-panel::before {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  content: "";
+  background:
+    linear-gradient(115deg, transparent 0 38%, color-mix(in srgb, var(--accent) 6%, transparent) 48%, transparent 58%),
+    linear-gradient(180deg, color-mix(in srgb, var(--text) 5%, transparent), transparent 30%);
+  opacity: 0.9;
+}
+
+.assistant-panel > * {
+  position: relative;
+  z-index: 1;
 }
 
 .assistant-thread {
@@ -1888,6 +1910,9 @@ p {
     var(--page-alt);
   padding: 18px;
   scrollbar-color: color-mix(in srgb, var(--muted) 45%, transparent) transparent;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text) 7%, transparent),
+    inset 0 -24px 80px rgba(0, 0, 0, 0.1);
 }
 
 .chat-bubble {
@@ -1907,19 +1932,26 @@ p {
   width: 38px;
   height: 38px;
   place-items: center;
-  border: 1px solid var(--line);
+  border: 1px solid color-mix(in srgb, var(--blue) 22%, var(--line));
   border-radius: 999px;
   background:
     linear-gradient(145deg, color-mix(in srgb, var(--text) 94%, var(--accent)), color-mix(in srgb, var(--text) 70%, var(--blue)));
   color: #07100d;
   font-size: 0.72rem;
   font-weight: 950;
+  box-shadow:
+    0 10px 26px rgba(59, 167, 255, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.32);
 }
 
 .chat-bubble.user .chat-avatar {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
   background:
     linear-gradient(145deg, color-mix(in srgb, var(--accent) 28%, var(--surface)), color-mix(in srgb, var(--accent) 14%, var(--surface)));
   color: var(--text);
+  box-shadow:
+    0 10px 26px rgba(47, 226, 139, 0.13),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 .chat-message {
@@ -1931,13 +1963,18 @@ p {
   background:
     linear-gradient(145deg, color-mix(in srgb, var(--surface-strong) 86%, transparent), color-mix(in srgb, var(--surface) 94%, transparent));
   padding: 14px 16px 15px;
-  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.16);
+  box-shadow:
+    0 18px 42px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
 }
 
 .chat-bubble.user .chat-message {
   border-color: color-mix(in srgb, var(--accent) 36%, var(--line));
   background:
     linear-gradient(145deg, color-mix(in srgb, var(--accent) 18%, var(--surface)), color-mix(in srgb, var(--accent) 10%, var(--surface-strong)));
+  box-shadow:
+    0 18px 42px rgba(47, 226, 139, 0.08),
+    inset 0 1px 0 color-mix(in srgb, var(--text) 6%, transparent);
 }
 
 .chat-meta {
@@ -1986,12 +2023,15 @@ p {
 .assistant-form {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
-  border: 1px solid var(--line);
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--line));
   border-radius: 28px;
   background:
+    radial-gradient(circle at 0% 0%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 38%),
     linear-gradient(145deg, color-mix(in srgb, var(--surface) 92%, transparent), color-mix(in srgb, var(--page-alt) 98%, transparent));
   padding: 8px;
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.18);
+  box-shadow:
+    0 18px 50px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
 }
 
 .assistant-form textarea {
@@ -2008,7 +2048,9 @@ p {
 }
 
 .assistant-form textarea:focus {
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 44%, transparent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--accent) 44%, transparent),
+    0 0 0 4px color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
 .assistant-form button {

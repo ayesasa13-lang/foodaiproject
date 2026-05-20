@@ -14,11 +14,13 @@ from app.main import (
     MEMORY_USERS_BY_ID,
     assistant_calendar_intent,
     assistant_food_log_action,
+    assistant_relevant_products_context,
     app,
     build_assistant_app_context,
     extract_assistant_lesson,
     hash_password_legacy,
     list_ai_lessons_for_user,
+    localize_assistant_reply,
     now_iso,
 )
 
@@ -256,6 +258,17 @@ def test_assistant_can_log_food_without_provider_key() -> None:
         assert meals.status_code == 200
         assert len(meals.json()) == 1
         assert meals.json()[0]["meal_slot"] == "lunch"
+
+
+def test_assistant_product_context_and_language_cleanup() -> None:
+    context = assistant_relevant_products_context("йоу что вкусного поесть на 20 евро")
+    assert "Relevant product database matches" in context
+    assert "kcal" in context
+    assert "price:" in context
+
+    reply = localize_assistant_reply("Вот идея.\n\nWhat to do now:\nPick one.", "ru")
+    assert "Что дальше:" in reply
+    assert "What to do now" not in reply
 
 
 def test_nutrition_estimate() -> None:

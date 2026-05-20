@@ -14,6 +14,7 @@ import sqlite3
 import time
 from typing import Annotated, Any, Literal
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import bcrypt
 import httpx
@@ -47,6 +48,7 @@ EXTERNAL_PRODUCTS_SQLITE = os.getenv("EXTERNAL_PRODUCTS_SQLITE", "")
 EXTERNAL_PRODUCTS_LIMIT = int(os.getenv("EXTERNAL_PRODUCTS_LIMIT", "30000"))
 EXTERNAL_PRODUCTS_REFRESH = os.getenv("EXTERNAL_PRODUCTS_REFRESH", "false").lower() == "true"
 APP_ENV = os.getenv("APP_ENV", "local")
+APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Europe/Madrid")
 USE_MEMORY_STORAGE = DATABASE_URL.startswith("memory://")
 USE_MEMORY_PLANNER = USE_MEMORY_STORAGE or PLANNER_DATABASE_URL.startswith("memory://")
 USE_MEMORY_ASSISTANT = USE_MEMORY_STORAGE or ASSISTANT_DATABASE_URL.startswith("memory://")
@@ -80,6 +82,13 @@ DANGEROUS_PATTERNS = [
         re.I,
     ),
 ]
+
+
+def app_now() -> datetime:
+    try:
+        return datetime.now(ZoneInfo(APP_TIMEZONE))
+    except Exception:
+        return datetime.now(timezone.utc)
 
 
 def now_iso() -> str:
@@ -2513,9 +2522,117 @@ def local_day_key(value: str) -> str:
     return value[:10]
 
 
+def format_product_context_line(food: FoodItem) -> str:
+    price = f"{food.price:.2f} {food.currency or 'EUR'}" if food.price is not None else "price unknown"
+    store = food.store or "store unknown"
+    brand = food.brand or "brand unknown"
+    serving = food.serving_label or "per 100g/serving"
+    return (
+        f"- {food.name}; brand: {brand}; store: {store}; serving: {serving}; "
+        f"{food.calories} kcal; P {food.protein_g}g, C {food.carbs_g}g, "
+        f"F {food.fat_g}g, fiber {food.fiber_g}g; price: {price}"
+    )
+
+
+def assistant_relevant_products_context(message: str) -> str:
+    lowered = message.lower()
+    food_markers = (
+        "eat",
+        "meal",
+        "food",
+        "product",
+        "price",
+        "budget",
+        "euro",
+        "eur",
+        "€",
+        "comer",
+        "comida",
+        "producto",
+        "precio",
+        "евро",
+        "поесть",
+        "съесть",
+        "еда",
+        "еду",
+        "продукт",
+        "цена",
+        "вкусн",
+        "бюджет",
+        "калор",
+    )
+    if not any(marker in lowered for marker in food_markers):
+        return ""
+
+    budget_match = re.search(r"(\d{1,4})\s*(?:€|eur|euro|евро)", lowered)
+    budget = float(budget_match.group(1)) if budget_match else None
+    stop_terms = {
+        "what",
+        "should",
+        "eat",
+        "food",
+        "meal",
+        "today",
+        "goal",
+        "budget",
+        "euro",
+        "eur",
+        "with",
+        "want",
+        "best",
+        "tasty",
+        "comer",
+        "comida",
+        "producto",
+        "precio",
+        "hoy",
+        "quiero",
+        "con",
+        "para",
+    }
+    terms = [term for term in query_terms(message) if term not in stop_terms and not term.isdigit()]
+    candidates: list[FoodItem] = []
+    seen: set[str] = set()
+
+    for term in terms[:6]:
+        for food in list_foods_from_storage(q=term, limit=8):
+            if food.id not in seen:
+                seen.add(food.id)
+                candidates.append(food)
+
+    if len(candidates) < 10:
+        for food in list_foods_from_storage(limit=80):
+            if food.id not in seen:
+                seen.add(food.id)
+                candidates.append(food)
+            if len(candidates) >= 24:
+                break
+
+    if not candidates:
+        return ""
+
+    def product_rank(food: FoodItem) -> tuple[int, float, int]:
+        price = float(food.price) if food.price is not None else 9999.0
+        over_budget = 1 if budget is not None and price > budget else 0
+        missing_price = 1 if food.price is None else 0
+        return (over_budget, missing_price, price, -food.protein_g)
+
+    ranked = sorted(candidates, key=product_rank)[:14]
+    lines = [
+        "Relevant product database matches for the user's latest message.",
+        "Use these exact database products, nutrition values, stores, brands, and prices when answering.",
+        "Do not invent restaurant dishes or prices if database products are listed here.",
+        "If the user asks about a budget, prefer items with known price inside that budget.",
+    ]
+    if budget is not None:
+        lines.append(f"Detected budget: {budget:.2f} EUR")
+    lines.extend(format_product_context_line(food) for food in ranked)
+    return "\n".join(lines)
+
+
 def build_assistant_app_context(user: dict[str, Any]) -> str:
     user_id = str(user["id"])
-    today = datetime.now(timezone.utc).date()
+    today = app_now().date()
     tomorrow = today + timedelta(days=1)
     meals = list_meals_for_user(user_id)
     today_meals = [meal for meal in meals if local_day_key(meal.logged_at) == today.isoformat()]
@@ -2571,6 +2688,34 @@ def assistant_language(message: str) -> str:
     if any(word in lowered for word in ("hola", "comí", "añade", "agrega", "calendario", "gramos")):
         return "es"
     return "en"
+
+
+def localize_assistant_reply(text: str, language: str) -> str:
+    if language == "ru":
+        replacements = {
+            r"\bWhat to do now:\s*": "Что дальше:\n",
+            r"\bWhat to do next:\s*": "Что дальше:\n",
+            r"\bNext step:\s*": "Что дальше:\n",
+            r"\bNext steps:\s*": "Что дальше:\n",
+            r"\bDone\.\s*": "Готово. ",
+            r"\bTotal:\s*": "Итого: ",
+        }
+    elif language == "es":
+        replacements = {
+            r"\bWhat to do now:\s*": "Qué hacer ahora:\n",
+            r"\bWhat to do next:\s*": "Qué hacer ahora:\n",
+            r"\bNext step:\s*": "Siguiente paso:\n",
+            r"\bNext steps:\s*": "Siguientes pasos:\n",
+            r"\bDone\.\s*": "Listo. ",
+            r"\bTotal:\s*": "Total: ",
+        }
+    else:
+        return text
+
+    localized = text
+    for pattern, replacement in replacements.items():
+        localized = re.sub(pattern, replacement, localized, flags=re.I)
+    return localized.strip()
 
 
 def assistant_unsafe_app_request(message: str) -> str | None:
@@ -2678,7 +2823,7 @@ def assistant_calendar_intent(message: str) -> CalendarEventCreateRequest | None
     if not any(word in lowered for word in action_words):
         return None
 
-    scheduled_date = datetime.now(timezone.utc).date()
+    scheduled_date = app_now().date()
     if re.search(r"\b(tomorrow|mañana|завтра)\b", lowered):
         scheduled_date += timedelta(days=1)
 
@@ -2862,7 +3007,8 @@ ASSISTANT_SYSTEM_PROMPT = (
     "Your voice is direct, simple, human, and a little distinctive. Do not sound like a generic polite chatbot. "
     "No long apologies, no corporate filler, no 'as an AI language model', no motivational fluff. "
     "Help with meal ideas, product choices, diary reflection, calendar planning, and habit building. "
-    "You can use the private app context supplied by the backend: profile, calorie goal, meals, and calendar plans. "
+    "You can use the private app context supplied by the backend: profile, calorie goal, meals, calendar plans, and relevant product database matches with prices. "
+    "If product database matches are listed, base recommendations on those exact products, stores, prices, kcal, and macros. Do not invent menu items, restaurant prices, or products when database matches are available. "
     "The backend can execute safe app actions when the user's intent is clear: add a meal to the diary, create a calendar note, or use profile/diary/calendar context. Do not say you cannot do these safe actions. "
     "Never expose raw database data, SQL, tokens, passwords, API keys, admin data, or other users' data. "
     "When the user asks what they ate, how much is left, or what to eat next, use the listed diary totals and meal names directly. "
@@ -2870,7 +3016,7 @@ ASSISTANT_SYSTEM_PROMPT = (
     "When useful, suggest concrete app actions like add to diary, edit grams, create a reminder, or duplicate a recent meal. "
     "If a calendar action was completed by the backend, clearly say it was added and mention the date/time. "
     "If the user corrects you or says remember/запомни/recuerda, treat that as a lesson for future replies. "
-    "Preferred structure: answer first, then 'What to do now:' with one or two concrete actions when useful. "
+    "Preferred structure: answer first, then one tiny next-action label in the user's language when useful: Russian 'Что дальше:', Spanish 'Qué hacer ahora:', English 'What to do now:'. Never use English labels in a Russian or Spanish reply. "
     "Do not diagnose, treat, or replace medical advice. Keep answers practical and safe. "
     "Write clean plain text only: no Markdown, no asterisks, no bold markers, no bullet glyphs. "
     "Use short paragraphs, clear labels, and numbered steps only when they make the answer easier to scan. "
@@ -3383,9 +3529,18 @@ def create_assistant_message(
 
     reply = generate_assistant_reply(
         [*existing, user_message],
-        build_assistant_app_context(user),
+        "\n\n".join(
+            part
+            for part in (
+                build_assistant_app_context(user),
+                assistant_relevant_products_context(payload.message),
+                f"Latest user message language: {assistant_language(payload.message)}. Keep the entire reply in that language, including section labels and final action line.",
+            )
+            if part
+        ),
         action_note,
     )
+    reply = localize_assistant_reply(reply, assistant_language(payload.message))
     assistant_message = create_assistant_message_for_user(user_id, context.id, "assistant", reply)
     log_security_event("assistant_message", "info", request, user_id, "Assistant reply generated")
     return assistant_message
