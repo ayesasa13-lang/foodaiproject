@@ -2874,7 +2874,7 @@ def detect_meal_slot(message: str) -> MealSlot:
     if any(word in lowered for word in ("snack", "перекус", "merienda")):
         return "snack"
 
-    hour = datetime.now(timezone.utc).hour
+    hour = app_now().hour
     if hour < 11:
         return "breakfast"
     if hour < 16:
@@ -2882,6 +2882,199 @@ def detect_meal_slot(message: str) -> MealSlot:
     if hour < 21:
         return "dinner"
     return "snack"
+
+
+def is_previous_suggestion_add_request(message: str) -> bool:
+    lowered = message.lower()
+    action_markers = (
+        "впих",
+        "добав",
+        "закин",
+        "запиш",
+        "сохрани",
+        "логни",
+        "add",
+        "log",
+        "save",
+        "añade",
+        "agrega",
+        "guarda",
+    )
+    reference_markers = (
+        "то что ты написал",
+        "что ты написал",
+        "то что предложил",
+        "что предложил",
+        "это",
+        "эти",
+        "этот вариант",
+        "вариант",
+        "до этого",
+        "previous",
+        "that",
+        "those",
+        "this",
+        "suggestion",
+        "lo que dijiste",
+        "eso",
+        "estos",
+        "esta opción",
+    )
+    calculation_markers = ("сам посчитай", "посчитай сколько", "calculate", "calcula")
+    return (
+        any(marker in lowered for marker in action_markers)
+        and any(marker in lowered for marker in reference_markers)
+    ) or (
+        any(marker in lowered for marker in calculation_markers)
+        and any(marker in lowered for marker in reference_markers)
+    )
+
+
+def suggestion_query_candidates(line: str) -> list[str]:
+    cleaned = normalize_text(line)
+    if not cleaned:
+        return []
+
+    candidates: list[str] = []
+    for match in re.findall(r"\(([^()]{3,120})\)", cleaned):
+        candidate = normalize_text(match)
+        if re.search(r"[a-záéíóúüñçа-яё]", candidate, re.I) and not re.search(
+            r"\b(?:kcal|ккал|eur|euro|евро|protein|carbs|fat)\b",
+            candidate,
+            re.I,
+        ):
+            candidates.append(candidate)
+
+    no_parentheses = re.sub(r"\([^)]*\)", " ", cleaned)
+    no_parentheses = re.sub(r"^\s*\d+[\).]?\s*", " ", no_parentheses)
+    no_parentheses = re.sub(r"\b(?:возьми|добавь|к ним добавь|и для сытости|take|add|añade|agrega)\b", " ", no_parentheses, flags=re.I)
+    no_parentheses = re.split(r"\b(?:из|from|de)\s+[A-ZА-ЯЁa-záéíóúüñçа-яё0-9 _-]+?\s+(?:за|for|por)\b", no_parentheses, maxsplit=1, flags=re.I)[0]
+    no_parentheses = re.split(r"\b(?:за|for|por|около|примерно|about|around)\b", no_parentheses, maxsplit=1, flags=re.I)[0]
+    no_parentheses = re.sub(r"\b\d+(?:[.,]\d+)?\s*(?:ккал|kcal|евро|eur|€)\b", " ", no_parentheses, flags=re.I)
+    no_parentheses = normalize_text(no_parentheses).strip(" .,-:;")
+    if re.search(r"[a-záéíóúüñçа-яё]", no_parentheses, re.I):
+        candidates.append(no_parentheses)
+
+    return [candidate for candidate in candidates if len(candidate) >= 3][:4]
+
+
+def extract_foods_from_assistant_suggestion(content: str) -> list[FoodItem]:
+    foods: list[FoodItem] = []
+    seen: set[str] = set()
+    skip_markers = (
+        "итого",
+        "total",
+        "общая сумма",
+        "общая калорийность",
+        "что дальше",
+        "what to do",
+        "qué hacer",
+        "остается",
+        "можем",
+    )
+    for raw_line in content.splitlines():
+        line = normalize_text(raw_line)
+        if not line or any(marker in line.lower() for marker in skip_markers):
+            continue
+        if not re.search(r"\b(?:ккал|kcal|евро|eur|€)\b", line, re.I):
+            continue
+
+        for candidate in suggestion_query_candidates(line):
+            matches = list_foods_from_storage(q=candidate, limit=5)
+            if not matches:
+                terms = query_terms(candidate)
+                for size in range(min(len(terms), 4), 0, -1):
+                    query = " ".join(terms[:size])
+                    matches = list_foods_from_storage(q=query, limit=5)
+                    if matches:
+                        break
+            if matches:
+                food = matches[0]
+                if food.id not in seen:
+                    seen.add(food.id)
+                    foods.append(food)
+                break
+        if len(foods) >= 6:
+            break
+    return foods
+
+
+def assistant_add_previous_suggestion_action(
+    user_id: str,
+    message: str,
+    existing_messages: list[AssistantMessageResponse],
+) -> str | None:
+    if not is_previous_suggestion_add_request(message):
+        return None
+
+    language = assistant_language(message)
+    previous_assistant = next(
+        (item for item in reversed(existing_messages) if item.role == "assistant"),
+        None,
+    )
+    if previous_assistant is None:
+        if language == "ru":
+            return "Пока нечего добавлять: сначала попроси меня собрать вариант еды из базы."
+        if language == "es":
+            return "Todavía no hay nada que añadir: primero pídeme una opción de comida de la base."
+        return "Nothing to add yet: first ask me to build a meal option from the database."
+
+    foods = extract_foods_from_assistant_suggestion(previous_assistant.content)
+    if not foods:
+        if language == "ru":
+            return "Не смог надёжно вытащить продукты из прошлого ответа. Напиши названия продуктов или попроси собрать вариант ещё раз."
+        if language == "es":
+            return "No pude extraer productos claros de mi respuesta anterior. Escribe los nombres o pide otra opción."
+        return "I could not safely extract products from my previous answer. Send the product names or ask for a new option."
+
+    meal_slot = detect_meal_slot(message)
+    created_meals = [
+        create_meal_for_user(
+            user_id,
+            MealCreateRequest(
+                food_id=food.id,
+                meal_slot=meal_slot,
+                serving_multiplier=1,
+                note="Added from assistant suggestion",
+            ),
+        )
+        for food in foods
+    ]
+    total_price = sum(float(meal.food.price or 0) for meal in created_meals)
+    known_prices = sum(1 for meal in created_meals if meal.food.price is not None)
+    total_calories = sum(meal.calories for meal in created_meals)
+    total_protein = sum(meal.protein_g for meal in created_meals)
+    total_carbs = sum(meal.carbs_g for meal in created_meals)
+    total_fat = sum(meal.fat_g for meal in created_meals)
+
+    lines = [
+        f"{meal.food.name} — {meal.calories} kcal"
+        + (f", {meal.food.price:.2f} {meal.food.currency or 'EUR'}" if meal.food.price is not None else "")
+        for meal in created_meals
+    ]
+    if language == "ru":
+        price_line = f"{total_price:.2f} EUR" if known_prices else "цены неизвестны"
+        return (
+            f"Готово. Добавил в дневник в {meal_slot}:\n"
+            + "\n".join(lines)
+            + f"\n\nИтого: {total_calories} kcal, белки {total_protein}g, углеводы {total_carbs}g, жиры {total_fat}g."
+            + f"\nСумма по известным ценам: {price_line}."
+        )
+    if language == "es":
+        price_line = f"{total_price:.2f} EUR" if known_prices else "precios desconocidos"
+        return (
+            f"Listo. Lo añadí al diario en {meal_slot}:\n"
+            + "\n".join(lines)
+            + f"\n\nTotal: {total_calories} kcal, proteína {total_protein}g, carbs {total_carbs}g, grasa {total_fat}g."
+            + f"\nPrecio conocido: {price_line}."
+        )
+    price_line = f"{total_price:.2f} EUR" if known_prices else "unknown prices"
+    return (
+        f"Done. Added this to your diary in {meal_slot}:\n"
+        + "\n".join(lines)
+        + f"\n\nTotal: {total_calories} kcal, protein {total_protein}g, carbs {total_carbs}g, fat {total_fat}g."
+        + f"\nKnown price total: {price_line}."
+    )
 
 
 def extract_serving_multiplier(message: str) -> tuple[float | None, str]:
@@ -3496,6 +3689,19 @@ def create_assistant_message(
             model="safe-action-router",
         )
         log_security_event("assistant_safe_refusal", "info", request, user_id, "Unsafe app request refused")
+        return assistant_message
+
+    previous_suggestion_reply = assistant_add_previous_suggestion_action(user_id, payload.message, existing)
+    if previous_suggestion_reply:
+        assistant_message = create_assistant_message_for_user(
+            user_id,
+            context.id,
+            "assistant",
+            previous_suggestion_reply,
+            provider="trackfoodai",
+            model="safe-action-router",
+        )
+        log_security_event("assistant_previous_suggestion_action", "info", request, user_id, "Assistant previous suggestion handled")
         return assistant_message
 
     food_action_reply = assistant_food_log_action(user_id, payload.message)

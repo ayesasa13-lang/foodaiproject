@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 from app.main import (
     MEMORY_USERS_BY_EMAIL,
     MEMORY_USERS_BY_ID,
+    AssistantMessageResponse,
+    assistant_add_previous_suggestion_action,
     assistant_calendar_intent,
     assistant_food_log_action,
     assistant_relevant_products_context,
@@ -269,6 +271,48 @@ def test_assistant_product_context_and_language_cleanup() -> None:
     reply = localize_assistant_reply("Вот идея.\n\nWhat to do now:\nPick one.", "ru")
     assert "Что дальше:" in reply
     assert "What to do now" not in reply
+
+
+def test_assistant_adds_previous_suggestion_to_diary() -> None:
+    with TestClient(app) as client:
+        register = client.post(
+            "/api/v1/auth/register",
+            json={
+                "name": "Followup User",
+                "email": "followup@example.com",
+                "password": "LocalPass123",
+                "calorie_goal": 1900,
+                "activity_level": "balanced",
+            },
+        )
+        user_id = register.json()["profile"]["id"]
+        previous = AssistantMessageResponse(
+            id="assistant-suggestion",
+            context_id="ctx",
+            role="assistant",
+            content=(
+                "Возьми Chicken rice bowl из TrackFood AI (612 kcal).\n"
+                "К ним добавь Greek yogurt berries (238 kcal).\n"
+                "Итого: 850 kcal."
+            ),
+            provider="test",
+            model="test",
+            created_at=now_iso(),
+        )
+
+        reply = assistant_add_previous_suggestion_action(
+            user_id,
+            "сам посчитай сколько нужно и впихни то что ты написал до этого",
+            [previous],
+        )
+
+        assert reply is not None
+        assert "Добавил в дневник" in reply
+
+        headers = {"Authorization": f"Bearer {register.json()['token']}"}
+        meals = client.get("/api/v1/meals", headers=headers)
+        assert meals.status_code == 200
+        assert len(meals.json()) == 2
 
 
 def test_nutrition_estimate() -> None:
