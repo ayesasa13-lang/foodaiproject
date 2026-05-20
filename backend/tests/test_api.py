@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 from app.main import (
     MEMORY_USERS_BY_EMAIL,
     MEMORY_USERS_BY_ID,
+    assistant_calendar_intent,
+    assistant_food_log_action,
     app,
     build_assistant_app_context,
     extract_assistant_lesson,
@@ -217,6 +219,43 @@ def test_assistant_learns_user_corrections_without_provider_key() -> None:
         app_context = build_assistant_app_context(MEMORY_USERS_BY_ID[payload["profile"]["id"]])
         assert "Assistant lessons learned from this user" in app_context
         assert "отвечай короче" in app_context
+
+
+def test_assistant_cleans_calendar_title_to_core_action() -> None:
+    payload = assistant_calendar_intent("можешь пометить в календаре что в 18 мне нужно уйти в зал")
+    assert payload is not None
+    assert payload.title == "уйти в зал"
+    assert payload.scheduled_time == "18:00"
+
+    english_payload = assistant_calendar_intent("add to calendar at 18:30 gym")
+    assert english_payload is not None
+    assert english_payload.title == "gym"
+    assert english_payload.scheduled_time == "18:30"
+
+
+def test_assistant_can_log_food_without_provider_key() -> None:
+    with TestClient(app) as client:
+        register = client.post(
+            "/api/v1/auth/register",
+            json={
+                "name": "Action User",
+                "email": "action-user@example.com",
+                "password": "LocalPass123",
+                "calorie_goal": 1900,
+                "activity_level": "balanced",
+            },
+        )
+        user_id = register.json()["profile"]["id"]
+        reply = assistant_food_log_action(user_id, "add 100g chicken rice bowl to lunch")
+
+        assert reply is not None
+        assert "Added to your diary" in reply
+
+        headers = {"Authorization": f"Bearer {register.json()['token']}"}
+        meals = client.get("/api/v1/meals", headers=headers)
+        assert meals.status_code == 200
+        assert len(meals.json()) == 1
+        assert meals.json()[0]["meal_slot"] == "lunch"
 
 
 def test_nutrition_estimate() -> None:

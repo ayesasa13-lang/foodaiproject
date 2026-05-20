@@ -2564,6 +2564,97 @@ def build_assistant_app_context(user: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def assistant_language(message: str) -> str:
+    lowered = message.lower()
+    if re.search(r"[а-яё]", lowered):
+        return "ru"
+    if any(word in lowered for word in ("hola", "comí", "añade", "agrega", "calendario", "gramos")):
+        return "es"
+    return "en"
+
+
+def assistant_unsafe_app_request(message: str) -> str | None:
+    lowered = message.lower()
+    unsafe_markers = (
+        "raw database",
+        "sql",
+        "select *",
+        "dump",
+        "all users",
+        "other users",
+        "password hash",
+        "token",
+        "api key",
+        "базу данных",
+        "таблиц",
+        "дамп",
+        "всех пользователей",
+        "пароли",
+        "токены",
+        "ключи api",
+        "base de datos",
+        "todos los usuarios",
+        "contraseñas",
+    )
+    if not any(marker in lowered for marker in unsafe_markers):
+        return None
+
+    language = assistant_language(message)
+    if language == "ru":
+        return (
+            "Не дам доступ к сырой базе, токенам, паролям или чужим данным.\n\n"
+            "Могу безопасно работать внутри приложения: добавить еду в дневник, создать план в календаре, "
+            "посмотреть твой профиль, дневные калории и твои записи."
+        )
+    if language == "es":
+        return (
+            "No doy acceso a la base de datos cruda, tokens, contraseñas ni datos de otros usuarios.\n\n"
+            "Sí puedo trabajar dentro de la app: añadir comida al diario, crear planes, revisar tu perfil, "
+            "calorías del día y tus registros."
+        )
+    return (
+        "I cannot expose raw database data, tokens, passwords, or other users' data.\n\n"
+        "I can safely work inside the app: add food to your diary, create calendar plans, and use your profile, "
+        "daily calories, and logged meals."
+    )
+
+
+def clean_calendar_title(message: str) -> str:
+    title = normalize_text(message)
+    title = re.sub(
+        r"^(?:можешь|можно|пожалуйста|пж|сможешь|can you|could you|please|puedes|podrías)\s+",
+        " ",
+        title,
+        flags=re.I,
+    )
+    parts = re.split(r"\b(?:что|чтобы|that|que)\b", title, flags=re.I)
+    if len(parts) > 1 and len(normalize_text(parts[-1])) >= 2:
+        title = parts[-1]
+
+    cleanup_patterns = [
+        r"\b(?:at|в|a las)\s*(?:[01]?\d|2[0-3])(?:[:.]\d{2})?\b",
+        r"\b(?:[01]?\d|2[0-3])(?:[:.]\d{2})?\b",
+        r"^(?:add|create|remind me to|put|plan|calendar|note)\s+",
+        r"^(?:добавь|добавить|создай|запланируй|напомни|поставь|пометь|отметь|запиши)\s+",
+        r"^(?:añade|agrega|crea|recuérdame|planifica|apunta)\s+",
+        r"^(?:мне\s+)?(?:нужно|надо|нужно будет|надо будет)\s+",
+        r"^(?:i\s+need\s+to|need\s+to|i\s+should|tengo\s+que|necesito)\s+",
+        r"\b(?:note|заметку|заметка|nota)\b",
+        r"\b(?:to|в|на|in|into|al)\s+(?:my\s+|мой\s+|моем\s+|mi\s+)?(?:calendar|календар[ьеь]|calendario)\b",
+        r"\b(?:today|сегодня|hoy|tomorrow|завтра|mañana)\b",
+    ]
+    previous = ""
+    while previous != title:
+        previous = title
+        for pattern in cleanup_patterns:
+            title = re.sub(pattern, " ", title, flags=re.I)
+        title = normalize_text(title).strip(" .,-:;\"'")
+
+    title = re.sub(r"^(?:мне\s+)?(?:нужно|надо)\s+", "", title, flags=re.I)
+    title = normalize_text(title).strip(" .,-:;\"'")
+    return (title or "Plan from Assistant")[:120]
+
+
 def assistant_calendar_intent(message: str) -> CalendarEventCreateRequest | None:
     text = normalize_text(message)
     lowered = text.lower()
@@ -2602,22 +2693,7 @@ def assistant_calendar_intent(message: str) -> CalendarEventCreateRequest | None
         if 0 <= minute <= 59:
             scheduled_time = f"{hour:02d}:{minute:02d}"
 
-    title = text
-    cleanup_patterns = [
-        r"^(?:add|create|remind me to|put|plan|calendar)\s+",
-        r"^(?:добавь|добавить|создай|запланируй|напомни|поставь)\s+",
-        r"^(?:añade|agrega|crea|recuérdame|planifica)\s+",
-        r"\b(?:note|заметку|заметка|nota)\b",
-        r"\b(?:to|в|на|in|into|al)\s+(?:my\s+)?(?:calendar|календарь|calendario)\b",
-        r"\b(?:today|сегодня|hoy|tomorrow|завтра|mañana)\b",
-        r"\b(?:at|в|a las)\s*(?:[01]?\d|2[0-3])(?::\d{2})?\b",
-    ]
-    for pattern in cleanup_patterns:
-        title = re.sub(pattern, " ", title, flags=re.I)
-    title = normalize_text(title).strip(" .,-:;")
-    if not title:
-        title = "Plan from Assistant"
-    title = title[:120]
+    title = clean_calendar_title(text)
 
     if scheduled_time is None and not any(word in lowered for word in ("note", "замет", "nota")):
         return None
@@ -2632,6 +2708,153 @@ def assistant_calendar_intent(message: str) -> CalendarEventCreateRequest | None
     )
 
 
+def format_calendar_action_reply(message: str, event: CalendarEventResponse) -> str:
+    language = assistant_language(message)
+    time_label = event.scheduled_time or "all day"
+    if language == "ru":
+        return f"Готово. Добавил в календарь: {event.title}, {event.scheduled_date} в {time_label}."
+    if language == "es":
+        return f"Listo. Añadí al calendario: {event.title}, {event.scheduled_date} a las {time_label}."
+    return f"Done. Added to calendar: {event.title}, {event.scheduled_date} at {time_label}."
+
+
+def detect_meal_slot(message: str) -> MealSlot:
+    lowered = message.lower()
+    if any(word in lowered for word in ("breakfast", "desayuno", "завтрак")):
+        return "breakfast"
+    if any(word in lowered for word in ("lunch", "almuerzo", "comida", "обед")):
+        return "lunch"
+    if any(word in lowered for word in ("dinner", "cena", "ужин")):
+        return "dinner"
+    if any(word in lowered for word in ("snack", "перекус", "merienda")):
+        return "snack"
+
+    hour = datetime.now(timezone.utc).hour
+    if hour < 11:
+        return "breakfast"
+    if hour < 16:
+        return "lunch"
+    if hour < 21:
+        return "dinner"
+    return "snack"
+
+
+def extract_serving_multiplier(message: str) -> tuple[float | None, str]:
+    lowered = message.lower()
+    grams_match = re.search(r"\b(\d{1,4})\s*(?:г|гр|g|gr|gram|grams|gramos)\b", lowered)
+    if grams_match:
+        grams = int(grams_match.group(1))
+        return min(max(grams / 100, 0.05), 20.0), f"{grams}g"
+    if re.search(r"\b(?:serving|portion|порц|raci[oó]n)\b", lowered):
+        return 1.0, "1 serving"
+    if re.search(r"\b(?:pack|package|упаковк|paquete)\b", lowered):
+        return 1.0, "1 package"
+    return None, ""
+
+
+def clean_food_log_query(message: str) -> str:
+    query = normalize_text(message)
+    cleanup_patterns = [
+        r"\b\d{1,4}\s*(?:г|гр|g|gr|gram|grams|gramos)\b",
+        r"\b(?:add|log|save|ate|had|eat|food|diary|journal)\b",
+        r"\b(?:добавь|добавить|запиши|закинь|логни|сохрани|съел|съела|ел|ела|еда|еду|дневник|рацион)\b",
+        r"\b(?:añade|agrega|guarda|com[ií]|comida|diario)\b",
+        r"\b(?:to|for|в|на|al|a)\s+(?:my\s+|мой\s+|мою\s+|mi\s+)?(?:diary|journal|дневник|рацион|diario)\b",
+        r"\b(?:to|for|в|на|al|a)\s+(?:breakfast|lunch|dinner|snack|завтрак|обед|ужин|перекус|desayuno|almuerzo|comida|cena|merienda)\b",
+        r"\b(?:breakfast|lunch|dinner|snack|завтрак|обед|ужин|перекус|desayuno|almuerzo|comida|cena|merienda)\b",
+        r"\b(?:please|пожалуйста|пж|por favor|мне|я|my|mi)\b",
+    ]
+    previous = ""
+    while previous != query:
+        previous = query
+        for pattern in cleanup_patterns:
+            query = re.sub(pattern, " ", query, flags=re.I)
+        query = normalize_text(query).strip(" .,-:;\"'")
+    return query[:120]
+
+
+def is_food_log_request(message: str) -> bool:
+    lowered = message.lower()
+    markers = (
+        "add",
+        "log",
+        "save",
+        "ate",
+        "had",
+        "добав",
+        "запиш",
+        "закин",
+        "логни",
+        "съел",
+        "съела",
+        "дневник",
+        "рацион",
+        "añade",
+        "agrega",
+        "comí",
+        "diario",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def assistant_food_log_action(user_id: str, message: str) -> str | None:
+    if not is_food_log_request(message):
+        return None
+
+    language = assistant_language(message)
+    multiplier, amount_label = extract_serving_multiplier(message)
+    query = clean_food_log_query(message)
+
+    if multiplier is None or len(query) < 2:
+        if language == "ru":
+            return "Могу добавить сам. Напиши продукт и граммы одним сообщением, например: добавь 150 г pollo в ужин."
+        if language == "es":
+            return "Sí, puedo añadirlo yo. Escribe producto y gramos en un mensaje, por ejemplo: agrega 150g pollo a la cena."
+        return "Yes, I can add it. Send product and grams in one message, for example: add 150g chicken to dinner."
+
+    foods = list_foods_from_storage(q=query, limit=8)
+    if not foods:
+        terms = query_terms(query)
+        for term in reversed(terms):
+            foods = list_foods_from_storage(q=term, limit=8)
+            if foods:
+                break
+
+    if not foods:
+        if language == "ru":
+            return f"Не нашёл продукт: {query}. Уточни название как в поиске или попробуй бренд плюс продукт."
+        if language == "es":
+            return f"No encontré el producto: {query}. Prueba con el nombre exacto o marca más producto."
+        return f"I could not find this product: {query}. Try the exact name or brand plus product."
+
+    food = foods[0]
+    meal_slot = detect_meal_slot(message)
+    meal = create_meal_for_user(
+        user_id,
+        MealCreateRequest(
+            food_id=food.id,
+            meal_slot=meal_slot,
+            serving_multiplier=multiplier,
+            note="Added by TrackFood AI",
+        ),
+    )
+
+    if language == "ru":
+        return (
+            f"Готово. Добавил в дневник: {meal.food.name}, {meal_slot}, {amount_label}.\n\n"
+            f"Итого: {meal.calories} kcal, белки {meal.protein_g}g, углеводы {meal.carbs_g}g, жиры {meal.fat_g}g."
+        )
+    if language == "es":
+        return (
+            f"Listo. Añadí al diario: {meal.food.name}, {meal_slot}, {amount_label}.\n\n"
+            f"Total: {meal.calories} kcal, proteína {meal.protein_g}g, carbs {meal.carbs_g}g, grasa {meal.fat_g}g."
+        )
+    return (
+        f"Done. Added to your diary: {meal.food.name}, {meal_slot}, {amount_label}.\n\n"
+        f"Total: {meal.calories} kcal, protein {meal.protein_g}g, carbs {meal.carbs_g}g, fat {meal.fat_g}g."
+    )
+
+
 ASSISTANT_SYSTEM_PROMPT = (
     "You are TrackFood AI, a sharp nutrition and planning assistant inside a food tracker. "
     "You are multilingual: answer in the same language the user uses, especially English, Russian, or Spanish. "
@@ -2640,6 +2863,8 @@ ASSISTANT_SYSTEM_PROMPT = (
     "No long apologies, no corporate filler, no 'as an AI language model', no motivational fluff. "
     "Help with meal ideas, product choices, diary reflection, calendar planning, and habit building. "
     "You can use the private app context supplied by the backend: profile, calorie goal, meals, and calendar plans. "
+    "The backend can execute safe app actions when the user's intent is clear: add a meal to the diary, create a calendar note, or use profile/diary/calendar context. Do not say you cannot do these safe actions. "
+    "Never expose raw database data, SQL, tokens, passwords, API keys, admin data, or other users' data. "
     "When the user asks what they ate, how much is left, or what to eat next, use the listed diary totals and meal names directly. "
     "For nutrition estimates, always name the assumption: grams, serving, or package. If grams are missing, ask one short clarification or propose a realistic default and say it should be confirmed in the app. "
     "When useful, suggest concrete app actions like add to diary, edit grams, create a reminder, or duplicate a recent meal. "
@@ -3113,15 +3338,48 @@ def create_assistant_message(
     if learned_lesson:
         save_ai_lesson_for_user(user_id, learned_lesson, user_message.id)
         log_security_event("assistant_lesson_saved", "info", request, user_id, "Assistant lesson saved")
+
+    action_reply = assistant_unsafe_app_request(payload.message)
+    if action_reply:
+        assistant_message = create_assistant_message_for_user(
+            user_id,
+            context.id,
+            "assistant",
+            action_reply,
+            provider="trackfoodai",
+            model="safe-action-router",
+        )
+        log_security_event("assistant_safe_refusal", "info", request, user_id, "Unsafe app request refused")
+        return assistant_message
+
+    food_action_reply = assistant_food_log_action(user_id, payload.message)
+    if food_action_reply:
+        assistant_message = create_assistant_message_for_user(
+            user_id,
+            context.id,
+            "assistant",
+            food_action_reply,
+            provider="trackfoodai",
+            model="safe-action-router",
+        )
+        log_security_event("assistant_food_action", "info", request, user_id, "Assistant food action handled")
+        return assistant_message
+
     action_note = ""
     calendar_payload = assistant_calendar_intent(payload.message)
     if calendar_payload is not None:
         created_event = create_calendar_event_for_user(user_id, calendar_payload)
-        action_note = (
-            "Backend action completed: a calendar note was added. "
-            f"Title: {created_event.title}. Date: {created_event.scheduled_date}. "
-            f"Time: {created_event.scheduled_time or 'all day'}."
+        action_reply = format_calendar_action_reply(payload.message, created_event)
+        assistant_message = create_assistant_message_for_user(
+            user_id,
+            context.id,
+            "assistant",
+            action_reply,
+            provider="trackfoodai",
+            model="safe-action-router",
         )
+        log_security_event("assistant_calendar_action", "info", request, user_id, "Assistant calendar action handled")
+        return assistant_message
 
     reply = generate_assistant_reply(
         [*existing, user_message],
