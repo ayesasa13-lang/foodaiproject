@@ -21,16 +21,18 @@ Transform your meals into intelligent nutritional insights using computer vision
 
 ## 📱 Screenshots
 
-### Mobile Views
-| Home Screen | Diary & Tracking | Add Food | Insights & Analytics |
-|-------------|------------------|----------|----------------------|
-| ![Home](docs/screenshots/home.png) | ![Diary](docs/screenshots/sauge-home2.png) | ![Add Food](docs/screenshots/sauge-home3.png) | ![Insights](docs/screenshots/desktop-home.png) |
+### Mobile App Interface
 
-### App Tour
-![App Overview](docs/screenshots/sauge-app.png)
+| Home Screen | Dashboard | Diary | Add Food | Insights |
+|-------------|-----------|-------|----------|----------|
+| ![Home](docs/screenshots/01-home.png) | ![Dashboard](docs/screenshots/02-dashboard.png) | ![Diary](docs/screenshots/03-diary.png) | ![Add Food](docs/screenshots/04-add-food.png) | ![Insights](docs/screenshots/05-insights.png) |
 
-### Design System
-![Design System](docs/screenshots/logo-check.png)
+**Features showcased:**
+- 📸 **Home:** Camera-first design with calorie tracking goal
+- 📊 **Dashboard:** Complete nutrition overview with macro breakdown  
+- 📝 **Diary:** Food logging by meal time with detailed nutrition
+- ➕ **Add Food:** Search database, barcode scanning, and photo upload
+- 📈 **Insights:** Weekly analytics and nutrition trends
 
 ## 🏗️ Architecture
 
